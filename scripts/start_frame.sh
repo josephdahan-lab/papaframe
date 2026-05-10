@@ -20,6 +20,22 @@ detect_available_vt() {
     done
     echo ""
 }
+# Find the DRM card whose HDMI is connected. On Pi Zero/3 this is card0; on
+# Pi 4/5 the only card with dumb-buffer support is card1 (card0's KMS lacks
+# it and fbi fails with "drm: no dumb buffer support"). Empty if no HDMI is
+# currently connected — fbi will then run without -device.
+detect_drm_device() {
+    local connector card
+    for connector in /sys/class/drm/card*-HDMI-*/status; do
+        [ -f "$connector" ] || continue
+        [ "$(cat "$connector" 2>/dev/null)" = "connected" ] || continue
+        card="${connector#/sys/class/drm/}"
+        card="${card%%-*}"
+        echo "/dev/dri/$card"
+        return 0
+    done
+    return 1
+}
 
 # Resolve config values: relative paths anchor at the repo root (matches
 # the same rule applied in server.py via _cfg_path).
@@ -34,6 +50,12 @@ PHOTO_DIRS="${PHOTO_DIRS:-$HOME/Pictures}"
 RESHUFFLE_INTERVAL="${RESHUFFLE_INTERVAL:-900}"
 DEFAULT_DURATION="${DEFAULT_DURATION:-5}"
 DURATION="${DURATION:-$DEFAULT_DURATION}"
+
+# DRM device for fbi: "auto" picks the card with a connected HDMI; explicit
+# /dev/dri/cardN values are passed through; empty means "let fbi choose".
+if [ -z "${FBI_DEVICE+x}" ] || [ "$FBI_DEVICE" = "auto" ]; then
+    FBI_DEVICE="$(detect_drm_device || true)"
+fi
 
 # ── Environment detection and viewer selection ────────────────────────────────
 FORCE_VIEWER="${FORCE_VIEWER:-auto}"  # Options: auto, fbi, feh, eog, display
@@ -262,15 +284,16 @@ while true; do
     # Launch appropriate viewer based on environment
     case "$SELECTED_VIEWER" in
         fbi)
-            # Framebuffer image viewer - runs on Linux virtual terminal without X
-            # On Pi 4/5, /dev/dri/card0 lacks dumb-buffer support; HDMI is on card1.
-            fbi -device /dev/dri/card1 \
+            # Framebuffer image viewer - runs on Linux virtual terminal without X.
+            # FBI_DEVICE is auto-detected (or set in config.sh) — empty means
+            # "let fbi pick the default card", which is right on single-card Pis.
+            fbi ${FBI_DEVICE:+-device "$FBI_DEVICE"} \
                 -a -noverbose -readahead \
                 -t "$CUR_DURATION" \
                 -T "$FBI_VT" \
                 -l "$LIVE_LIST" </dev/tty"$FBI_VT" 2>/dev/null &
             VIEWER_PID=$!
-            echo "fbi started (PID $VIEWER_PID) on vt$FBI_VT at ${CUR_DURATION}s per photo"
+            echo "fbi started (PID $VIEWER_PID) on vt$FBI_VT, device=${FBI_DEVICE:-default}, ${CUR_DURATION}s per photo"
             ;;
         feh)
             # Feh - works on framebuffer or X11

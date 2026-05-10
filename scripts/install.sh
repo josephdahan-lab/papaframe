@@ -1,0 +1,164 @@
+#!/bin/bash
+# PapaFrame system installer for Raspberry Pi (or any Debian-based Linux).
+#
+# What this does:
+#   1. Installs apt packages (fbi, build deps for Pillow, python venv tools)
+#   2. Adds the install user to the `video` group (needed for /dev/fb0, /dev/dri)
+#   3. Creates .venv next to server.py and pip-installs requirements.txt
+#   4. Installs scripts/papaframe-screen → /usr/local/bin and the sudoers rule
+#   5. Sets the default systemd target to multi-user (no graphical login)
+#   6. Configures autologin for the install user on tty1
+#   7. Adds an exec line to ~/.bash_profile so tty1 launches the slideshow
+#   8. Installs and enables a systemd unit for the Flask web server
+#
+# Skipped — do these yourself:
+#   • Raspberry Pi OS install + first boot (use Raspberry Pi Imager and set
+#     hostname / Wi-Fi / SSH there).
+#   • Mounting a network share for photos (see INSTALL.md "Photos on a NAS").
+#   • Editing config.sh (PHOTO_DIRS, schedule, port). See INSTALL.md.
+#
+# Run from inside the cloned repo:
+#   sudo bash scripts/install.sh
+#
+# Idempotent — safe to re-run.
+
+set -e
+
+if [ "$EUID" -ne 0 ]; then
+    echo "This installer needs root. Re-run with: sudo bash scripts/install.sh" >&2
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TARGET_USER="${SUDO_USER:-$USER}"
+if [ "$TARGET_USER" = "root" ]; then
+    echo "Refusing to install for root — run via 'sudo' as a regular user." >&2
+    exit 1
+fi
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+[ -d "$TARGET_HOME" ] || { echo "Cannot find home dir for $TARGET_USER" >&2; exit 1; }
+
+echo "═══════════════════════════════════════════════════"
+echo "  PapaFrame installer"
+echo "    repo: $REPO_ROOT"
+echo "    user: $TARGET_USER  (home: $TARGET_HOME)"
+echo "═══════════════════════════════════════════════════"
+echo
+
+# ── 1. apt packages ─────────────────────────────────────────────────────────
+echo "[1/8] Installing system packages…"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y --no-install-recommends \
+    fbi \
+    python3 python3-venv python3-pip python3-dev \
+    libjpeg-dev zlib1g-dev libfreetype-dev \
+    git curl ca-certificates
+
+# ── 2. video group ──────────────────────────────────────────────────────────
+echo "[2/8] Adding $TARGET_USER to video group…"
+usermod -aG video "$TARGET_USER"
+
+# ── 3. Python venv + requirements ───────────────────────────────────────────
+echo "[3/8] Creating Python venv at $REPO_ROOT/.venv…"
+if [ ! -d "$REPO_ROOT/.venv" ]; then
+    sudo -u "$TARGET_USER" python3 -m venv "$REPO_ROOT/.venv"
+fi
+echo "       Installing Python requirements (this can take a while on Pi Zero)…"
+sudo -u "$TARGET_USER" "$REPO_ROOT/.venv/bin/pip" install --upgrade --quiet pip wheel
+sudo -u "$TARGET_USER" "$REPO_ROOT/.venv/bin/pip" install --quiet -r "$REPO_ROOT/requirements.txt"
+
+# ── 4. Screen helper + sudoers ──────────────────────────────────────────────
+echo "[4/8] Installing /usr/local/bin/papaframe-screen + sudoers rule…"
+install -m 0755 "$REPO_ROOT/scripts/papaframe-screen" /usr/local/bin/papaframe-screen
+SUDOERS=/etc/sudoers.d/papaframe-screen
+cat > "$SUDOERS" <<EOF
+$TARGET_USER ALL=(root) NOPASSWD: /usr/local/bin/papaframe-screen on, /usr/local/bin/papaframe-screen off
+EOF
+chmod 0440 "$SUDOERS"
+visudo -cf "$SUDOERS" >/dev/null
+
+# ── 5. Boot to console (no graphical target) ────────────────────────────────
+echo "[5/8] Setting default boot target to multi-user (console)…"
+systemctl set-default multi-user.target >/dev/null
+
+# ── 6. Autologin on tty1 ────────────────────────────────────────────────────
+echo "[6/8] Configuring autologin for $TARGET_USER on tty1…"
+DROPIN_DIR=/etc/systemd/system/getty@tty1.service.d
+mkdir -p "$DROPIN_DIR"
+cat > "$DROPIN_DIR/autologin.conf" <<EOF
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin $TARGET_USER --noclear %I \$TERM
+EOF
+systemctl daemon-reload
+
+# ── 7. .bash_profile slideshow exec ─────────────────────────────────────────
+echo "[7/8] Wiring slideshow autostart in $TARGET_HOME/.bash_profile…"
+PROFILE="$TARGET_HOME/.bash_profile"
+MARKER="# papaframe: launch slideshow when logged in on tty1"
+EXEC_LINE="[ \"\$(tty)\" = '/dev/tty1' ] && exec bash $REPO_ROOT/scripts/start_frame.sh"
+if [ ! -f "$PROFILE" ] || ! grep -Fq "$MARKER" "$PROFILE"; then
+    NEW_FILE=0
+    [ ! -f "$PROFILE" ] && NEW_FILE=1
+    {
+        # If we're creating .bash_profile fresh, source ~/.profile and ~/.bashrc
+        # so the user's existing login-shell init isn't silently shadowed.
+        if [ "$NEW_FILE" -eq 1 ]; then
+            echo '[ -f ~/.profile ] && . ~/.profile'
+            echo '[ -f ~/.bashrc ]  && . ~/.bashrc'
+            echo ''
+        fi
+        echo "$MARKER"
+        echo "$EXEC_LINE"
+    } >> "$PROFILE"
+    chown "$TARGET_USER:$TARGET_USER" "$PROFILE"
+    if [ "$NEW_FILE" -eq 1 ]; then
+        echo "       Created $PROFILE (sources ~/.profile and ~/.bashrc)."
+    else
+        echo "       Appended exec line to existing $PROFILE."
+    fi
+else
+    echo "       Already present — leaving alone."
+fi
+
+# ── 8. Systemd unit for the web server ──────────────────────────────────────
+echo "[8/8] Installing papaframe-server systemd unit…"
+UNIT=/etc/systemd/system/papaframe-server.service
+cat > "$UNIT" <<EOF
+[Unit]
+Description=PapaFrame web server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$TARGET_USER
+WorkingDirectory=$REPO_ROOT
+ExecStart=$REPO_ROOT/.venv/bin/python3 $REPO_ROOT/server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable papaframe-server.service >/dev/null
+
+echo
+echo "═══════════════════════════════════════════════════"
+echo "  Done."
+echo "═══════════════════════════════════════════════════"
+echo
+echo "Next steps:"
+echo "  1. Edit $REPO_ROOT/config.sh — set PHOTO_DIRS to where your photos are."
+echo "  2. (Optional) Mount a network share for photos. See INSTALL.md."
+echo "  3. Reboot to start the slideshow + web server:"
+echo "       sudo reboot"
+echo
+echo "After reboot:"
+echo "  • Slideshow runs on the attached display (tty1)."
+echo "  • Web UI at http://\$(hostname -I | awk '{print \$1}'):8000/"
+echo "  • Logs:  journalctl -u papaframe-server -f"
+echo "          tail -f $REPO_ROOT/frame_display.log"

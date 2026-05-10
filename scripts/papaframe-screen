@@ -1,0 +1,31 @@
+#!/bin/bash
+# PapaFrame screen power helper.
+#
+# Toggles the HDMI connector on or off via the DRM sysfs status file
+# (DPMS-style). Must run as root because /sys/class/drm is root-owned;
+# the install script wires up a passwordless sudoers rule so the web
+# server can call it as `sudo -n papaframe-screen on|off`.
+#
+# Auto-detects the connector so this works on Pi Zero/3 (single card,
+# HDMI on card0) and Pi 4/5 (HDMI on card1) without configuration.
+set -e
+
+# Pick the first HDMI port whose status is anything other than "disconnected".
+# - "connected" → screen is on, normal case
+# - "off"       → we already DPMS'd it off; same connector is the right target
+CONNECTOR=""
+for f in /sys/class/drm/card*-HDMI-*/status; do
+    [ -f "$f" ] || continue
+    [ "$(cat "$f")" != "disconnected" ] && { CONNECTOR="$f"; break; }
+done
+
+if [ -z "$CONNECTOR" ]; then
+    echo "papaframe-screen: no active HDMI connector found under /sys/class/drm" >&2
+    exit 1
+fi
+
+case "${1:-}" in
+    off) echo off > "$CONNECTOR" ;;
+    on)  echo on  > "$CONNECTOR" ;;
+    *)   echo "usage: $0 on|off" >&2; exit 2 ;;
+esac

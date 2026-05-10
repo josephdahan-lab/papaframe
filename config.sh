@@ -44,6 +44,13 @@ FORCE_VIEWER="auto"
 # "auto" picks the first writable VT (1-7). Set to a number (e.g. 1) to force.
 FBI_VT=auto
 
+# DRM device for fbi. "auto" detects the card with a connected HDMI:
+#  - Pi Zero / Pi 3: single card → /dev/dri/card0
+#  - Pi 4 / Pi 5:    two cards, but only card1 has dumb-buffer support
+# Override with /dev/dri/card0 or /dev/dri/card1 if auto-detect picks wrong.
+# Leave empty ("") to let fbi choose its own default.
+FBI_DEVICE="auto"
+
 # ── Web server ────────────────────────────────────────────────────
 # Bind address. "0.0.0.0" listens on every network interface.
 SERVER_HOST="0.0.0.0"

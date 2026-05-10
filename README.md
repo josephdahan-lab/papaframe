@@ -92,16 +92,28 @@ development.)
 
 ## Installation
 
+For a full Raspberry Pi setup (autologin kiosk + web server as systemd
+services + sudoers for screen on/off), see **[INSTALL.md](INSTALL.md)**.
+The short version:
+
+```bash
+git clone https://github.com/josephdahan-lab/papaframe.git
+cd papaframe
+sudo bash scripts/install.sh         # apt deps, venv, autologin, systemd
+nano config.sh                       # set PHOTO_DIRS
+sudo reboot
+```
+
+For a manual / non-Pi install:
+
 ```bash
 git clone https://github.com/josephdahan-lab/papaframe.git
 cd papaframe
 
-# Python deps in a venv (recommended)
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Make the slideshow runner executable
 chmod +x scripts/start_frame.sh
 ```
 
@@ -125,6 +137,7 @@ when moving PapaFrame to a different frame.
 | `RESHUFFLE_INTERVAL` | Background reshuffle interval (seconds)              | `900`                              |
 | `FORCE_VIEWER`       | `auto`, `fbi`, `feh`, `eog`, or `display`            | `auto`                             |
 | `FBI_VT`             | Virtual terminal for `fbi` (`auto` or a number 1–7)  | `auto`                             |
+| `FBI_DEVICE`         | DRM device for `fbi` (`auto`, `/dev/dri/cardN`, `""`) | `auto`                            |
 | `SERVER_HOST`        | Bind address (`0.0.0.0` = all interfaces)            | `0.0.0.0`                          |
 | `SERVER_PORT`        | TCP port for the web UI                              | `8000`                             |
 | `SOURCE_FILE`        | Master photo list (regenerated when missing)         | `photo_list.txt`                   |
@@ -300,7 +313,9 @@ papaframe/
 │   ├── style.css
 │   └── favicon.svg
 └── scripts/
-    └── start_frame.sh     ← slideshow launcher (sources config.sh)
+    ├── start_frame.sh     ← slideshow launcher (sources config.sh)
+    ├── papaframe-screen   ← root helper for HDMI on/off (installed to /usr/local/bin)
+    └── install.sh         ← Pi installer (apt deps, venv, autologin, systemd unit)
 ```
 
 State files written at runtime live under `/tmp/` (slideshow flags, the
