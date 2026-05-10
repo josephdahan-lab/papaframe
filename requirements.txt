@@ -1,0 +1,5 @@
+Flask>=3.1
+pillow>=11.0
+psutil>=6.0
+pycountry>=24.0
+reverse_geocoder>=1.5

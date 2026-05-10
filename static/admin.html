@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PapaFrame — Admin</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .admin-wrap { max-width: 760px; margin: 0 auto; padding: 1.5rem; }
+    .admin-wrap h1 { margin-bottom: .25rem; }
+    .admin-wrap .sub { opacity: .75; margin-top: 0; }
+    .admin-path {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: .85rem; opacity: .75; margin-bottom: 1.25rem;
+    }
+    .field { margin-bottom: 1.1rem; }
+    .field label {
+      display: block; font-weight: 600; margin-bottom: .25rem;
+    }
+    .field input[type=text], .field input[type=number] {
+      width: 100%; padding: .55rem .65rem;
+      border: 1px solid var(--border, #bbb);
+      border-radius: 8px; font-size: 1rem;
+      font-family: ui-monospace, Menlo, monospace;
+      background: var(--card-bg, #fff);
+      color: inherit;
+    }
+    .field .help {
+      font-size: .82rem; opacity: .7; margin-top: .25rem;
+    }
+    .action-row {
+      display: flex; gap: .5rem; flex-wrap: wrap; margin-top: 1.5rem;
+    }
+    .banner {
+      padding: .75rem 1rem; border-radius: 8px; margin-bottom: 1rem;
+      font-size: .9rem;
+    }
+    .banner.info    { background: #eaf3ff; color: #1e40af; }
+    .banner.warn    { background: #fff4d6; color: #8a5a00; }
+    .banner.error   { background: #fde2e2; color: #9b1c1c; }
+    .banner.success { background: #dcfce7; color: #166534; }
+    html.dark .banner.info    { background: #1e3a8a55; color: #cfe0ff; }
+    html.dark .banner.warn    { background: #7c560033; color: #fde68a; }
+    html.dark .banner.error   { background: #7f1d1d55; color: #fecaca; }
+    html.dark .banner.success { background: #14532d55; color: #bbf7d0; }
+    .back-link {
+      display: inline-flex; align-items: center; gap: .35rem;
+      font-size: .9rem; text-decoration: none; margin-bottom: 1rem;
+    }
+  </style>
+</head>
+<body>
+<div class="bg-base" aria-hidden="true"></div>
+
+<div class="admin-wrap">
+  <a class="back-link" href="/">← Back to dashboard</a>
+
+  <h1>PapaFrame — Admin</h1>
+  <p class="sub">Edit the configuration for this picture frame.</p>
+  <div class="admin-path">Config file: <span id="cfg-path">—</span></div>
+
+  <div class="banner warn">
+    Most changes require a server restart to take effect
+    (<code>python3 server.py</code>). Changing <strong>Photo folders</strong>
+    also needs a photo-list rebuild — use the button at the bottom.
+  </div>
+
+  <div id="status-banner"></div>
+
+  <form id="admin-form" autocomplete="off">
+    <div id="fields"></div>
+
+    <div class="action-row">
+      <button type="submit" class="btn-start">💾 Save config</button>
+      <button type="button" id="reload-btn" class="btn-secondary">↻ Reload from file</button>
+      <button type="button" id="rebuild-btn" class="btn-restart">🔁 Rebuild photo list</button>
+    </div>
+  </form>
+</div>
+
+<script>
+'use strict';
+
+const fieldsEl = document.getElementById('fields');
+const pathEl   = document.getElementById('cfg-path');
+const banner   = document.getElementById('status-banner');
+const form     = document.getElementById('admin-form');
+const reloadBtn  = document.getElementById('reload-btn');
+const rebuildBtn = document.getElementById('rebuild-btn');
+
+// Apply saved theme so the admin page matches the dashboard.
+(function applyTheme() {
+  const saved = localStorage.getItem('frameTheme');
+  const dark = saved
+    ? saved === 'dark'
+    : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.classList.toggle('dark', dark);
+})();
+
+function showBanner(msg, kind = 'info') {
+  banner.innerHTML = `<div class="banner ${kind}">${msg}</div>`;
+  if (kind === 'success') setTimeout(() => banner.innerHTML = '', 3500);
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                  .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderField(f) {
+  const inputType = f.type === 'int' ? 'number' : 'text';
+  return `
+    <div class="field">
+      <label for="f-${f.key}">${esc(f.label)} <small style="opacity:.55;font-weight:400">(${f.key})</small></label>
+      <input id="f-${f.key}" name="${f.key}" type="${inputType}" value="${esc(f.value)}">
+      <div class="help">${esc(f.help)}</div>
+    </div>`;
+}
+
+async function loadConfig() {
+  try {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+    pathEl.textContent = data.path;
+    fieldsEl.innerHTML = data.fields.map(renderField).join('');
+  } catch (e) {
+    showBanner('Failed to load config: ' + e.message, 'error');
+  }
+}
+
+async function saveConfig(ev) {
+  ev.preventDefault();
+  const payload = {};
+  for (const input of form.querySelectorAll('input[name]')) {
+    payload[input.name] = input.value;
+  }
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'save failed');
+    showBanner(
+      `Saved ${data.updated.length} setting(s). ` +
+      `Restart the server (<code>python3 server.py</code>) for changes to take effect.`,
+      'success'
+    );
+  } catch (e) {
+    showBanner('Save failed: ' + e.message, 'error');
+  }
+}
+
+async function rebuildPhotoList() {
+  if (!confirm('Delete the master photo list so it rebuilds from PHOTO_DIRS on the next slideshow start?')) return;
+  try {
+    const res = await fetch('/api/config/rebuild', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'rebuild failed');
+    showBanner('Photo list cleared. It will be rebuilt the next time the slideshow starts.', 'success');
+  } catch (e) {
+    showBanner('Rebuild failed: ' + e.message, 'error');
+  }
+}
+
+form.addEventListener('submit', saveConfig);
+reloadBtn.addEventListener('click', loadConfig);
+rebuildBtn.addEventListener('click', rebuildPhotoList);
+
+loadConfig();
+</script>
+</body>
+</html>

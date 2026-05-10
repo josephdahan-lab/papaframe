@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Runtime / generated state
+*.log
+photo_list*.txt
+location_cache.tsv
+schedule.json
+year_index.json
+location_index.json
+frame_display.log
+
+# Editor / OS
+.vscode/
+.idea/
+.claude/
+.DS_Store
+*.swp

@@ -1,0 +1,1346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PapaFrame</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+
+<!-- ── Background layers ─────────────────────────────────────────── -->
+<div class="bg-base" aria-hidden="true"></div>
+<div class="bg-art"  aria-hidden="true">
+  <svg id="bg-svg-light" xmlns="http://www.w3.org/2000/svg"
+       viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+    <defs>
+      <filter id="bl"><feGaussianBlur stdDeviation="110"/></filter>
+      <filter id="bm"><feGaussianBlur stdDeviation="80"/></filter>
+    </defs>
+    <ellipse cx="200"  cy="380" rx="560" ry="440" fill="#93c5fd" opacity=".40" filter="url(#bl)"/>
+    <ellipse cx="1300" cy="180" rx="480" ry="390" fill="#c4b5fd" opacity=".38" filter="url(#bl)"/>
+    <ellipse cx="960"  cy="880" rx="560" ry="360" fill="#fbcfe8" opacity=".35" filter="url(#bm)"/>
+    <ellipse cx="1680" cy="600" rx="380" ry="300" fill="#a5f3fc" opacity=".28" filter="url(#bm)"/>
+    <ellipse cx="480"  cy="900" rx="320" ry="240" fill="#bbf7d0" opacity=".26" filter="url(#bm)"/>
+  </svg>
+  <svg id="bg-svg-dark" xmlns="http://www.w3.org/2000/svg"
+       viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice" style="display:none">
+    <defs>
+      <filter id="dbl"><feGaussianBlur stdDeviation="120"/></filter>
+      <filter id="dbm"><feGaussianBlur stdDeviation="85"/></filter>
+    </defs>
+    <ellipse cx="220"  cy="440" rx="620" ry="500" fill="#1e3a8a" opacity=".52" filter="url(#dbl)"/>
+    <ellipse cx="1380" cy="200" rx="520" ry="420" fill="#4c1d95" opacity=".38" filter="url(#dbl)"/>
+    <ellipse cx="880"  cy="920" rx="580" ry="360" fill="#0f2d5c" opacity=".48" filter="url(#dbm)"/>
+    <ellipse cx="1700" cy="580" rx="400" ry="320" fill="#1e3a8a" opacity=".35" filter="url(#dbm)"/>
+    <ellipse cx="480"  cy="960" rx="340" ry="260" fill="#064e3b" opacity=".28" filter="url(#dbm)"/>
+  </svg>
+</div>
+
+<!-- ── Toast container ───────────────────────────────────────────── -->
+<div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+<!-- ── Page ───────────────────────────────────────────────────────── -->
+<div class="page">
+
+  <!-- Header -->
+  <header>
+    <div class="header-row">
+      <div>
+        <h1 class="brand"><span class="brand-thin">Papa</span><span class="brand-bold">Frame</span></h1>
+        <p id="hostname-display" class="hostname-text">Loading…</p>
+        <p>Control and monitor the Raspberry Pi slideshow display.</p>
+      </div>
+      <div class="header-actions">
+        <a class="pi-connect-link"
+           href="https://connect.raspberrypi.com/sign-in"
+           target="_blank" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 512 512" fill="currentColor"
+               xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M256 32C132.3 32 32 132.3 32 256s100.3 224 224 224
+                     224-100.3 224-224S379.7 32 256 32zm0 48c97.2 0 176
+                     78.8 176 176S353.2 432 256 432 80 353.2 80 256
+                     158.8 80 256 80zm-40 72c-13.3 0-24 10.7-24 24s10.7
+                     24 24 24 24-10.7 24-24-10.7-24-24-24zm80 0c-13.3
+                     0-24 10.7-24 24s10.7 24 24 24 24-10.7 24-24-10.7
+                     -24-24-24zm-88 80c-13.3 0-24 10.7-24 24s10.7 24
+                     24 24 24-10.7 24-24-10.7-24-24-24zm96 0c-13.3
+                     0-24 10.7-24 24s10.7 24 24 24 24-10.7 24-24-10.7
+                     -24-24-24zm-48 48c-13.3 0-24 10.7-24 24s10.7 24
+                     24 24 24-10.7 24-24-10.7-24-24-24z"/>
+          </svg>
+          Pi Connect
+        </a>
+        <a class="btn-secondary" href="/admin" title="Edit configuration">⚙ Admin</a>
+        <button id="theme-toggle" class="btn-secondary" type="button">Dark mode</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Dashboard grid: left | center | right ── -->
+  <div class="dashboard-grid">
+
+    <!-- LEFT: Status + Controls -->
+    <div class="panel-left">
+
+      <!-- Status card -->
+      <div class="card">
+        <div class="section-title">Slideshow Status</div>
+        <div class="status-indicator">
+          <div id="status-dot" class="status-dot-large"></div>
+          <span id="status" class="status-label">Loading…</span>
+        </div>
+        <div class="status-rows">
+          <div class="status-kv">
+            <span class="key">PID</span>
+            <span class="value" id="pid">—</span>
+          </div>
+          <div class="status-kv">
+            <span class="key">Duration</span>
+            <span class="value" id="running-duration">—</span>
+          </div>
+          <div class="status-kv">
+            <span class="key">Server uptime</span>
+            <span class="value" id="uptime">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Controls card -->
+      <div class="card">
+        <div class="section-title">Controls</div>
+        <div class="action-buttons">
+          <button id="start"   class="btn-start">▶ Start</button>
+          <button id="stop"    class="btn-stop">■ Stop</button>
+          <button id="restart" class="btn-restart">↻ Restart</button>
+          <button id="screen-off" class="btn-secondary" title="Blank the display">🌙 Screen off</button>
+          <button id="screen-on"  class="btn-secondary" title="Wake the display">☀ Screen on</button>
+        </div>
+
+        <div class="duration-section">
+          <label for="duration">Photo duration (seconds)</label>
+          <div class="duration-row">
+            <input type="number" id="duration" class="duration-input" min="1" max="300" value="5">
+            <div class="preset-buttons">
+              <button class="preset-btn" data-duration="5">5s</button>
+              <button class="preset-btn" data-duration="10">10s</button>
+              <button class="preset-btn" data-duration="20">20s</button>
+              <button class="preset-btn" data-duration="30">30s</button>
+              <button class="preset-btn" data-duration="60">1m</button>
+            </div>
+          </div>
+          <button id="apply-duration" class="btn-apply" disabled>⚡ Apply Duration</button>
+          <div class="duration-hint" id="duration-hint"></div>
+        </div>
+      </div>
+
+      <!-- Schedule card -->
+      <div class="card">
+        <div class="section-title">Daily Schedule</div>
+        <div class="schedule-content">
+          <label>
+            <input type="checkbox" id="schedule-toggle" checked>
+            <span id="schedule-status">Schedule enabled</span>
+          </label>
+          <div class="schedule-times" id="schedule-times">
+            <div class="schedule-time-group">
+              <label for="screen-off-time">Screen off time</label>
+              <input type="time" id="screen-off-time" value="23:59">
+              <span class="schedule-hint">Pauses slideshow</span>
+            </div>
+            <div class="schedule-time-group">
+              <label for="screen-on-time">Screen on time</label>
+              <input type="time" id="screen-on-time" value="06:00">
+              <span class="schedule-hint">Resumes slideshow</span>
+            </div>
+          </div>
+          <button id="schedule-save-btn" class="btn-apply">💾 Save Schedule</button>
+          <div id="schedule-paused-banner" class="schedule-paused-banner" hidden>
+            🌙 Slideshow paused — screen scheduled off
+          </div>
+        </div>
+      </div>
+
+      <!-- Disk card -->
+      <div class="card">
+        <div class="section-title">Disk Usage</div>
+        <div class="disk-rows">
+          <div class="disk-kv"><span class="key">Total</span>  <span class="value" id="disk-total">—</span></div>
+          <div class="disk-kv"><span class="key">Used</span>   <span class="value" id="disk-used">—</span></div>
+          <div class="disk-kv"><span class="key">Free</span>   <span class="value" id="disk-free">—</span></div>
+          <div class="disk-kv"><span class="key">Used %</span> <span class="value" id="disk-pct">—</span></div>
+        </div>
+        <div class="disk-bar-wrap">
+          <div id="disk-bar" class="disk-bar" style="width:0%"></div>
+        </div>
+      </div>
+
+    </div><!-- /panel-left -->
+
+    <!-- CENTER: Now Playing -->
+    <div class="card">
+      <div class="section-title">Now Playing</div>
+      <div class="photo-strip">
+        <div class="photo-card" id="card-prev">
+          <div class="photo-card-label">Previous</div>
+          <div class="photo-thumb-placeholder" id="prev-placeholder">—</div>
+          <div class="photo-meta" id="meta-prev"></div>
+        </div>
+        <div class="photo-card current" id="card-curr">
+          <div class="photo-card-label">Now Showing</div>
+          <div class="photo-thumb-placeholder" id="curr-placeholder">—</div>
+          <div class="photo-meta" id="meta-curr"></div>
+        </div>
+        <div class="photo-card" id="card-next">
+          <div class="photo-card-label">Up Next</div>
+          <div class="photo-thumb-placeholder" id="next-placeholder">—</div>
+          <div class="photo-meta" id="meta-next"></div>
+        </div>
+      </div>
+      <div class="photo-progress">
+        <span id="photo-index-label">—</span>
+        <div class="photo-progress-bar-wrap">
+          <div id="photo-progress-bar" class="photo-progress-bar" style="width:0%"></div>
+        </div>
+        <span id="photo-total-label">—</span>
+      </div>
+    </div>
+
+    <!-- RIGHT: Library + Facts -->
+    <div class="panel-right">
+
+      <!-- Photo Library -->
+      <div class="card">
+        <div class="section-title">Photo Library</div>
+        <div class="photo-hero">
+          <span id="photo-count" class="photo-count">—</span>
+          <span class="photo-count-label">photos</span>
+        </div>
+        <div id="stat-pills" class="stat-pills">
+          <span class="stat-pill">Loading…</span>
+        </div>
+      </div>
+
+      <!-- Fun Facts -->
+      <div class="card">
+        <div class="section-title">Fun Facts</div>
+        <div class="facts-list">
+          <div class="fact-row">
+            <span class="fact-val" id="fact-marathon">—</span>
+            <span class="fact-desc">to watch every photo at current duration</span>
+          </div>
+          <div class="fact-row">
+            <span class="fact-val" id="fact-years">—</span>
+            <span class="fact-desc" id="fact-years-desc">years of memories</span>
+          </div>
+          <div class="fact-row">
+            <span class="fact-val" id="fact-per-day">—</span>
+            <span class="fact-desc">unique photos per day</span>
+          </div>
+          <div class="fact-row">
+            <span class="fact-val">15 min</span>
+            <span class="fact-desc">reshuffle interval</span>
+          </div>
+          <div class="fact-row">
+            <span class="fact-val" id="fact-pct-jpeg">—</span>
+            <span class="fact-desc">of photos are JPEG</span>
+          </div>
+          <div class="fact-row">
+            <span class="fact-val" id="fact-cpu">—</span>
+            <span class="fact-desc">current CPU usage</span>
+          </div>
+          <div class="fact-row">
+            <span class="fact-val" id="fact-uptime2">—</span>
+            <span class="fact-desc">server uptime</span>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /panel-right -->
+  </div><!-- /dashboard-grid -->
+
+  <!-- ── Year Filter ── -->
+  <div class="card year-filter-card" id="year-filter-card">
+    <div class="year-filter-header">
+      <span class="section-title" style="margin:0">Filter by Year</span>
+      <span class="year-filter-status" id="year-filter-status"></span>
+      <button class="btn-secondary year-rebuild-btn" id="year-rebuild-btn"
+              title="Rebuild year index after adding photos">↺ Rebuild index</button>
+    </div>
+    <div class="year-buttons" id="year-buttons">
+      <span class="year-loading">Building year index…</span>
+    </div>
+  </div>
+
+  <!-- ── Location Filter ── -->
+  <div class="card year-filter-card" id="location-filter-card">
+    <div class="year-filter-header">
+      <span class="section-title" style="margin:0">Filter by Location</span>
+      <span class="year-filter-status" id="location-filter-status"></span>
+      <button class="btn-secondary year-rebuild-btn" id="location-rebuild-btn"
+              title="Rebuild location index after adding photos">↺ Rebuild index</button>
+    </div>
+    <div class="year-buttons" id="location-buttons">
+      <span class="year-loading">Building location index…</span>
+    </div>
+  </div>
+
+  <!-- ── Bottom row: Map | Chart + Settings ── -->
+  <div class="bottom-grid">
+
+    <!-- World Map -->
+    <div class="card">
+      <div class="section-title">Photo Locations This Session</div>
+      <div class="map-wrap">
+        <div id="photo-map" style="height:100%;width:100%;"></div>
+      </div>
+      <div class="map-footer">
+        <span class="map-count" id="map-count">0 locations tracked</span>
+        <button class="btn-secondary" id="map-clear">Clear session</button>
+      </div>
+    </div>
+
+    <!-- Chart + Notes -->
+    <div class="panel-chart-settings">
+
+      <div class="card">
+        <div class="chart-title">CPU Usage</div>
+        <canvas id="utilizationChart" height="200"></canvas>
+      </div>
+
+      <div class="card notes">
+        <p>Logs: <code>frame_display.log</code></p>
+        <p>Run: <code>python3 server.py</code></p>
+        <p>Changing duration via <strong>Apply Duration</strong> kills fbi and lets the bash
+           restart loop pick up the new value — no full restart needed.</p>
+      </div>
+
+    </div>
+
+  </div><!-- /bottom-grid -->
+
+</div><!-- .page -->
+
+<script>
+'use strict';
+
+// ── Refs ──────────────────────────────────────────────────────────────
+const statusEl       = document.getElementById('status');
+const statusDot      = document.getElementById('status-dot');
+const pidEl          = document.getElementById('pid');
+const uptimeEl       = document.getElementById('uptime');
+const runningDurEl   = document.getElementById('running-duration');
+const startBtn       = document.getElementById('start');
+const stopBtn        = document.getElementById('stop');
+const restartBtn     = document.getElementById('restart');
+const applyDurBtn    = document.getElementById('apply-duration');
+const durationEl     = document.getElementById('duration');
+const durHintEl      = document.getElementById('duration-hint');
+const themeToggle    = document.getElementById('theme-toggle');
+const toastCont      = document.getElementById('toast-container');
+const hostnameEl     = document.getElementById('hostname-display');
+
+// ── Toast ──────────────────────────────────────────────────────────────
+function toast(title, sub = '', type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `<span class="toast-icon"></span>
+    <div class="toast-body">
+      <div class="toast-title">${title}</div>
+      ${sub ? `<div class="toast-sub">${sub}</div>` : ''}
+    </div>`;
+  toastCont.appendChild(el);
+  setTimeout(() => el.remove(), 3600);
+}
+
+// ── Theme ──────────────────────────────────────────────────────────────
+const THEME_KEY = 'frameTheme';
+
+function getSystemTheme() {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function applyTheme(theme) {
+  const dark = theme === 'dark';
+  document.documentElement.classList.toggle('dark', dark);
+  themeToggle.textContent = dark ? 'Light mode' : 'Dark mode';
+  document.getElementById('bg-svg-light').style.display = dark ? 'none' : '';
+  document.getElementById('bg-svg-dark').style.display  = dark ? '' : 'none';
+  if (cpuChart) updateChartTheme(dark);
+  updateMapTheme(dark);
+}
+
+themeToggle.addEventListener('click', () => {
+  const next = document.documentElement.classList.contains('dark') ? 'light' : 'dark';
+  applyTheme(next);
+  localStorage.setItem(THEME_KEY, next);
+});
+
+// Follow system theme changes when no explicit preference is saved
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (!localStorage.getItem(THEME_KEY)) applyTheme(getSystemTheme());
+});
+
+// ── Formatters ─────────────────────────────────────────────────────────
+function fmtBytes(b) {
+  if (b >= 1e12) return (b/1e12).toFixed(1) + ' TB';
+  if (b >= 1e9)  return (b/1e9).toFixed(1)  + ' GB';
+  if (b >= 1e6)  return (b/1e6).toFixed(1)  + ' MB';
+  return (b/1e3).toFixed(0) + ' KB';
+}
+function fmtNum(n) { return Number(n).toLocaleString(); }
+function fmtDuration(s) {
+  if (s < 60)        return `${Math.round(s)}s`;
+  if (s < 3600)      return `${Math.round(s/60)}m`;
+  if (s < 86400)     return `${(s/3600).toFixed(1)}h`;
+  if (s < 86400*365) return `${(s/86400).toFixed(1)} days`;
+  return `${(s/86400/365).toFixed(1)} yrs`;
+}
+function fmtUptime(s) {
+  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${s%60}s`;
+}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Duration state ──────────────────────────────────────────────────────
+let lastConfirmedDuration = null;
+let currentlyRunning = false;
+
+function updateDurationUI() {
+  const d = parseInt(durationEl.value, 10) || 5;
+  updateFacts();
+
+  // Highlight matching preset button
+  document.querySelectorAll('.preset-btn').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.duration) === d);
+  });
+
+  if (currentlyRunning) {
+    if (lastConfirmedDuration !== null && d !== lastConfirmedDuration) {
+      durHintEl.textContent = `Running at ${lastConfirmedDuration}s — click Apply to change`;
+      durHintEl.classList.add('changed');
+      applyDurBtn.disabled = false;
+    } else {
+      durHintEl.textContent = lastConfirmedDuration ? `Currently running at ${lastConfirmedDuration}s` : '';
+      durHintEl.classList.remove('changed');
+      applyDurBtn.disabled = true;
+    }
+  } else {
+    durHintEl.textContent = 'Duration applies on next start';
+    durHintEl.classList.remove('changed');
+    applyDurBtn.disabled = true;
+  }
+}
+
+durationEl.addEventListener('input', updateDurationUI);
+durationEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !applyDurBtn.disabled) doApplyDuration();
+});
+document.querySelectorAll('.preset-btn').forEach(b =>
+  b.addEventListener('click', () => { durationEl.value = b.dataset.duration; updateDurationUI(); })
+);
+
+// ── Status handling ─────────────────────────────────────────────────────
+function applyStatus(body) {
+  const running = body.running;
+  const pausedBySchedule = !!body.paused_by_schedule;
+  currentlyRunning = running;
+  if (running) {
+    statusEl.textContent = 'Running';
+  } else if (pausedBySchedule) {
+    statusEl.textContent = 'Paused — screen scheduled off';
+  } else {
+    statusEl.textContent = 'Stopped';
+  }
+  statusDot.classList.toggle('running', running);
+  statusDot.classList.toggle('paused', !running && pausedBySchedule);
+
+  // Tint the status card when running, or mark it paused-by-schedule
+  const statusCard = statusDot.closest('.card');
+  if (statusCard) {
+    statusCard.classList.toggle('status-running', running);
+    statusCard.classList.toggle('status-paused', !running && pausedBySchedule);
+  }
+  // Schedule-pause banner mirrors the same signal in the Schedule card
+  const pausedBanner = document.getElementById('schedule-paused-banner');
+  if (pausedBanner) pausedBanner.hidden = !pausedBySchedule;
+  pidEl.textContent = body.pid ?? '—';
+
+  // Correct button disabled states
+  startBtn.disabled   = running;
+  stopBtn.disabled    = !running;
+  restartBtn.disabled = false;   // always available
+  // Screen buttons are always enabled, independent of slideshow state
+  document.getElementById('screen-on').disabled = false;
+  document.getElementById('screen-off').disabled = false;
+
+  if (body.duration) {
+    lastConfirmedDuration = body.duration;
+    runningDurEl.textContent = `${body.duration}s / photo`;
+  } else if (!running) {
+    lastConfirmedDuration = null;
+    runningDurEl.textContent = '—';
+  }
+  updateDurationUI();
+}
+
+async function fetchStatus() {
+  try {
+    const body = await fetch('/api/status').then(r => r.json());
+    applyStatus(body);
+    return body;
+  } catch {
+    statusEl.textContent = 'Error';
+    statusDot.classList.remove('running');
+    return null;
+  }
+}
+
+async function fetchHostname() {
+  try {
+    const body = await fetch('/api/hostname').then(r => r.json());
+    if (body.hostname) {
+      hostnameEl.textContent = body.hostname;
+    }
+  } catch {
+    hostnameEl.textContent = 'Unknown';
+  }
+}
+
+// ── Button helpers ──────────────────────────────────────────────────────
+function setBusy(btn) {
+  btn.disabled = true;
+  btn.classList.add('loading');
+}
+function clearBusy(...btns) {
+  btns.forEach(b => { b.classList.remove('loading'); });
+}
+function refreshButtons(status) {
+  clearBusy(startBtn, stopBtn, restartBtn, applyDurBtn);
+  // Screen buttons are always enabled and independent
+  document.getElementById('screen-on').disabled = false;
+  document.getElementById('screen-off').disabled = false;
+  if (status) applyStatus(status);
+}
+
+// ── Start ───────────────────────────────────────────────────────────────
+async function doStart() {
+  const duration = parseInt(durationEl.value, 10) || 5;
+  setBusy(startBtn);
+  restartBtn.disabled = true;
+  toast('Starting slideshow…', `${duration}s per photo`, 'info');
+  try {
+    const res  = await fetch('/api/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ duration }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const s = await fetchStatus();
+    if (s?.running) {
+      toast('Slideshow started', `Resuming at ${duration}s per photo`, 'success');
+    } else {
+      toast('Start timed out', 'Check frame_display.log', 'error');
+    }
+    refreshButtons(s);
+  } catch(e) {
+    toast('Start failed', e.message, 'error');
+    refreshButtons(await fetchStatus());
+  }
+}
+
+// ── Stop ────────────────────────────────────────────────────────────────
+async function doStop() {
+  // Only grey out Stop — Start and Restart stay available immediately
+  setBusy(stopBtn);
+  toast('Stopping slideshow…', 'Saving position for next start', 'info');
+  try {
+    const res  = await fetch('/api/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const s = await fetchStatus();
+    if (!s?.running) {
+      toast('Slideshow stopped', 'Position saved — Start will resume here', 'success');
+    } else {
+      toast('Stop failed', 'Process may still be running', 'error');
+    }
+    refreshButtons(s);
+  } catch(e) {
+    toast('Stop failed', e.message, 'error');
+    refreshButtons(await fetchStatus());
+  }
+}
+
+// ── Restart ─────────────────────────────────────────────────────────────
+async function doRestart() {
+  const duration = parseInt(durationEl.value, 10) || 5;
+  setBusy(startBtn); setBusy(stopBtn); setBusy(restartBtn);
+  toast('Restarting slideshow…', 'Resuming from current photo', 'info');
+  try {
+    const res  = await fetch('/api/restart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ duration }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const s = await fetchStatus();
+    if (s?.running) {
+      toast('Restarted', `Resumed at ${duration}s per photo`, 'success');
+    } else {
+      toast('Restart timed out', 'Check frame_display.log', 'error');
+    }
+    refreshButtons(s);
+  } catch(e) {
+    toast('Restart failed', e.message, 'error');
+    refreshButtons(await fetchStatus());
+  }
+}
+
+// ── Apply Duration (live — resumes at current photo, no full restart) ───
+async function doApplyDuration() {
+  const duration = parseInt(durationEl.value, 10) || 5;
+  setBusy(applyDurBtn);
+  toast('Applying new duration…', `Switching to ${duration}s — resuming at current photo`, 'info');
+  try {
+    const res  = await fetch('/api/setduration', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ duration }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    toast('Duration updated', `Now ${duration}s per photo`, 'success');
+    refreshButtons(await fetchStatus());
+  } catch(e) {
+    toast('Failed to apply duration', e.message, 'error');
+    refreshButtons(await fetchStatus());
+  }
+}
+
+startBtn.addEventListener('click',    doStart);
+stopBtn.addEventListener('click',     doStop);
+restartBtn.addEventListener('click',  doRestart);
+applyDurBtn.addEventListener('click', doApplyDuration);
+
+async function doScreen(state) {
+  const screenOffBtn = document.getElementById('screen-off');
+  const screenOnBtn = document.getElementById('screen-on');
+  
+  // Disable during request
+  screenOffBtn.disabled = true;
+  screenOnBtn.disabled = true;
+  
+  try {
+    const res = await fetch('/api/screen', {
+      method:  'POST',
+      headers: {'Content-Type':'application/json'},
+      body:    JSON.stringify({ state }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    toast(state === 'on' ? 'Screen on' : 'Screen off',
+          state === 'on' ? 'Display woken' : 'Display blanked', 'success');
+  } catch (e) {
+    toast('Screen control failed', e.message, 'error');
+  } finally {
+    // Always re-enable both buttons
+    screenOffBtn.disabled = false;
+    screenOnBtn.disabled = false;
+  }
+}
+document.getElementById('screen-off').addEventListener('click', () => doScreen('off'));
+document.getElementById('screen-on').addEventListener('click',  () => doScreen('on'));
+
+// ── Schedule management ────────────────────────────────────────────
+async function fetchScheduleStatus() {
+  try {
+    const data = await fetch('/api/schedule/status').then(r => r.json());
+    const toggle = document.getElementById('schedule-toggle');
+    const status = document.getElementById('schedule-status');
+    const timesDiv = document.getElementById('schedule-times');
+    
+    toggle.checked = data.enabled;
+    status.textContent = data.enabled ? 'Schedule enabled' : 'Schedule disabled';
+    timesDiv.style.opacity = data.enabled ? '1' : '0.5';
+    timesDiv.style.pointerEvents = data.enabled ? 'auto' : 'none';
+    
+    // Set the time inputs
+    const [offHour, offMin] = data.screen_off_time.split(':');
+    const [onHour, onMin] = data.screen_on_time.split(':');
+    document.getElementById('screen-off-time').value = `${offHour}:${offMin}`;
+    document.getElementById('screen-on-time').value = `${onHour}:${onMin}`;
+  } catch(e) {
+    console.error('Failed to fetch schedule status:', e);
+  }
+}
+
+async function saveSchedule() {
+  const offTime = document.getElementById('screen-off-time').value;
+  const onTime = document.getElementById('screen-on-time').value;
+  
+  if (!offTime || !onTime) {
+    toast('Invalid time', 'Please enter valid times', 'error');
+    return;
+  }
+  
+  try {
+    const res = await fetch('/api/schedule/configure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        screen_off_time: offTime,
+        screen_on_time: onTime,
+      }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    toast('Schedule saved', `Off at ${offTime}, on at ${onTime}`, 'success');
+  } catch(e) {
+    toast('Failed to save schedule', e.message, 'error');
+  }
+}
+
+document.getElementById('schedule-toggle').addEventListener('change', async (e) => {
+  const endpoint = e.target.checked ? '/api/schedule/enable' : '/api/schedule/disable';
+  try {
+    const res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    fetchScheduleStatus();
+    const msg = data.enabled ? 'Schedule enabled' : 'Schedule disabled';
+    toast(msg, e.target.checked ? 'Slideshow will pause at 11:59 PM' : 'Schedule paused', 'info');
+  } catch(e) {
+    toast('Failed to update schedule', e.message, 'error');
+    fetchScheduleStatus();
+  }
+});
+
+document.getElementById('schedule-save-btn').addEventListener('click', saveSchedule);
+
+// ── Year filter ─────────────────────────────────────────────────────────
+let _yearActive = null;   // currently active year filter (null = all)
+let _yearReady  = false;  // index built?
+
+function fmtCount(n) {
+  if (n >= 1000) return (n/1000).toFixed(1) + 'k';
+  return String(n);
+}
+
+function renderYearButtons(years, active, total) {
+  const container = document.getElementById('year-buttons');
+  container.innerHTML = '';
+
+  // "All Photos" button
+  const allBtn = document.createElement('button');
+  allBtn.className = 'year-btn' + (active === null ? ' year-btn-active' : '');
+  allBtn.innerHTML = `<span class="year-btn-label">All Photos</span><span class="year-btn-count">${fmtCount(total)}</span>`;
+  allBtn.addEventListener('click', () => doSetFilter(null));
+  container.appendChild(allBtn);
+
+  years.forEach(({year, count}) => {
+    const btn = document.createElement('button');
+    btn.className = 'year-btn' + (active === year ? ' year-btn-active' : '');
+    btn.innerHTML = `<span class="year-btn-label">${year}</span><span class="year-btn-count">${fmtCount(count)}</span>`;
+    btn.addEventListener('click', () => doSetFilter(year));
+    container.appendChild(btn);
+  });
+}
+
+function updateYearStatus(active, count) {
+  const el = document.getElementById('year-filter-status');
+  if (active) {
+    el.textContent = count ? `Showing ${active} — ${fmtCount(count)} photos` : `Showing ${active} only`;
+    el.className = 'year-filter-status active';
+  } else {
+    el.textContent = 'All years';
+    el.className = 'year-filter-status';
+  }
+}
+
+async function fetchYears() {
+  try {
+    const d = await fetch('/api/years').then(r => r.json());
+    _yearActive = d.active;
+    _yearReady  = d.ready;
+    if (d.years.length > 0) {
+      renderYearButtons(d.years, d.active, d.total || 0);
+    } else if (!d.ready) {
+      document.getElementById('year-buttons').innerHTML =
+        '<span class="year-loading">Building year index… check back in a moment.</span>';
+    }
+    // Find count for the active year
+    const activeEntry = d.active ? d.years.find(y => y.year === d.active) : null;
+    updateYearStatus(d.active, activeEntry ? activeEntry.count : null);
+  } catch(e) { console.error('years:', e); }
+}
+
+async function doSetFilter(year) {
+  // Optimistically update UI immediately
+  _yearActive = year;
+
+  // Find the count for the selected year from the rendered buttons
+  let selectedCount = null;
+  document.querySelectorAll('.year-btn').forEach(b => {
+    const label = b.querySelector('.year-btn-label').textContent;
+    const isAll = label === 'All Photos';
+    const isActive = (year === null && isAll) || (year !== null && label === String(year));
+    b.classList.toggle('year-btn-active', isActive);
+    if (isActive && year !== null) {
+      const countEl = b.querySelector('.year-btn-count');
+      if (countEl) selectedCount = countEl.textContent;
+    }
+  });
+  updateYearStatus(year, selectedCount);
+
+  try {
+    const res  = await fetch('/api/setfilter', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({ year }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (year) {
+      toast(`Filtering to ${year}`, `Reshuffling slideshow with ${selectedCount || ''} matching photos`, 'success');
+    } else {
+      toast('All photos', 'Reshuffling slideshow with entire library', 'success');
+    }
+    // Re-fetch status after fbi restarts
+    setTimeout(fetchStatus, 4000);
+  } catch(e) {
+    toast('Filter failed', e.message, 'error');
+  }
+}
+
+document.getElementById('year-rebuild-btn').addEventListener('click', async () => {
+  document.getElementById('year-buttons').innerHTML =
+    '<span class="year-loading">Rebuilding… this may take a minute.</span>';
+  await fetch('/api/rebuildyears', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+  toast('Rebuilding year index', 'Will be ready in ~30–60s', 'info');
+  // Poll until ready
+  const poll = setInterval(async () => {
+    await fetchYears();
+    if (_yearReady) clearInterval(poll);
+  }, 5000);
+});
+
+// ── Location filter ─────────────────────────────────────────────────────
+const LOC_NONE = '-';           // sentinel for "no location"
+let _locActive = null;          // currently active country code (or '-' or null)
+let _locReady  = false;
+
+function locLabelFor(cc, name) {
+  return cc === LOC_NONE ? 'No Location' : (name || cc);
+}
+
+function renderLocationButtons(data) {
+  const container = document.getElementById('location-buttons');
+  container.innerHTML = '';
+
+  if (!data.available) {
+    container.innerHTML =
+      '<span class="year-loading">Location filter unavailable — install <code>reverse_geocoder</code> on the server.</span>';
+    return;
+  }
+
+  const { countries, total, no_location, active } = data;
+
+  // "All Photos"
+  const allBtn = document.createElement('button');
+  allBtn.className = 'year-btn' + (active == null ? ' year-btn-active' : '');
+  allBtn.dataset.cc = '';
+  allBtn.innerHTML = `<span class="year-btn-label">All Photos</span><span class="year-btn-count">${fmtCount(total)}</span>`;
+  allBtn.addEventListener('click', () => doSetLocation(null));
+  container.appendChild(allBtn);
+
+  countries.forEach(({cc, name, count}) => {
+    const btn = document.createElement('button');
+    btn.className = 'year-btn' + (active === cc ? ' year-btn-active' : '');
+    btn.dataset.cc = cc;
+    btn.innerHTML = `<span class="year-btn-label">${esc(locLabelFor(cc, name))}</span><span class="year-btn-count">${fmtCount(count)}</span>`;
+    btn.addEventListener('click', () => doSetLocation(cc));
+    container.appendChild(btn);
+  });
+
+  if (no_location > 0) {
+    const btn = document.createElement('button');
+    btn.className = 'year-btn' + (active === LOC_NONE ? ' year-btn-active' : '');
+    btn.dataset.cc = LOC_NONE;
+    btn.innerHTML = `<span class="year-btn-label">No Location</span><span class="year-btn-count">${fmtCount(no_location)}</span>`;
+    btn.addEventListener('click', () => doSetLocation(LOC_NONE));
+    container.appendChild(btn);
+  }
+}
+
+function updateLocationStatus(active, label, count) {
+  const el = document.getElementById('location-filter-status');
+  if (active) {
+    el.textContent = count
+      ? `Showing ${label} — ${fmtCount(count)} photos`
+      : `Showing ${label}`;
+    el.className = 'year-filter-status active';
+  } else {
+    el.textContent = 'All locations';
+    el.className = 'year-filter-status';
+  }
+}
+
+async function fetchLocations() {
+  try {
+    const d = await fetch('/api/locations').then(r => r.json());
+    _locReady  = d.ready;
+    _locActive = d.active;
+    if (!d.available) {
+      renderLocationButtons(d);
+      updateLocationStatus(null);
+      return;
+    }
+    if (d.ready) {
+      renderLocationButtons(d);
+    } else {
+      document.getElementById('location-buttons').innerHTML =
+        '<span class="year-loading">Building location index… this can take a while the first time.</span>';
+    }
+    // Label + count for status line
+    let label = null, count = null;
+    if (d.active === LOC_NONE) {
+      label = 'No Location';
+      count = d.no_location;
+    } else if (d.active) {
+      const entry = d.countries.find(c => c.cc === d.active);
+      if (entry) { label = locLabelFor(entry.cc, entry.name); count = entry.count; }
+      else       { label = d.active; }
+    }
+    updateLocationStatus(d.active, label, count);
+  } catch (e) { console.error('locations:', e); }
+}
+
+async function doSetLocation(cc) {
+  _locActive = cc;
+
+  // Optimistic UI
+  let label = null, count = null;
+  document.querySelectorAll('#location-buttons .year-btn').forEach(b => {
+    const isActive = (cc == null && b.dataset.cc === '') || b.dataset.cc === cc;
+    b.classList.toggle('year-btn-active', isActive);
+    if (isActive && cc) {
+      label = b.querySelector('.year-btn-label').textContent;
+      const cEl = b.querySelector('.year-btn-count');
+      if (cEl) count = cEl.textContent;
+    }
+  });
+  updateLocationStatus(cc, label, count);
+
+  try {
+    const res  = await fetch('/api/setlocationfilter', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({ cc }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (cc) {
+      toast(`Filtering to ${label || cc}`,
+            `Reshuffling slideshow with ${count || ''} matching photos`, 'success');
+    } else {
+      toast('All locations', 'Reshuffling slideshow with entire library', 'success');
+    }
+    // Year filter is mutually exclusive — refresh its UI to reflect the clear.
+    fetchYears();
+    setTimeout(fetchStatus, 4000);
+  } catch (e) {
+    toast('Filter failed', e.message, 'error');
+  }
+}
+
+document.getElementById('location-rebuild-btn').addEventListener('click', async () => {
+  document.getElementById('location-buttons').innerHTML =
+    '<span class="year-loading">Rebuilding location index… this may take a while.</span>';
+  await fetch('/api/rebuildlocations', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: '{}',
+  });
+  toast('Rebuilding location index', 'Reading EXIF GPS for new photos', 'info');
+  const poll = setInterval(async () => {
+    await fetchLocations();
+    if (_locReady) clearInterval(poll);
+  }, 5000);
+});
+
+// ── Photo info ──────────────────────────────────────────────────────────
+let photoData = {};
+
+async function fetchPhotoInfo() {
+  try {
+    photoData = await fetch('/api/photoinfo').then(r => r.json());
+    const {count=0, year_min, year_max, jpg=0, png=0, other=0} = photoData;
+    document.getElementById('photo-count').textContent = fmtNum(count);
+
+    const pills = document.getElementById('stat-pills');
+    pills.innerHTML = '';
+    const add = t => {
+      const s = document.createElement('span');
+      s.className = 'stat-pill'; s.textContent = t;
+      pills.appendChild(s);
+    };
+    if (year_min && year_max) add(`${year_min} – ${year_max}`);
+    if (jpg)   add(`${fmtNum(jpg)} JPEG`);
+    if (png)   add(`${fmtNum(png)} PNG`);
+    if (other) add(`${fmtNum(other)} other`);
+    updateFacts();
+  } catch(e) { console.error('photoinfo:', e); }
+}
+
+function updateFacts() {
+  const {count=0, year_min, year_max, jpg=0} = photoData;
+  const dur = parseInt(durationEl.value, 10) || 5;
+  if (count) {
+    document.getElementById('fact-marathon').textContent = fmtDuration(count * dur);
+    document.getElementById('fact-per-day').textContent  = fmtNum(Math.floor(86400/dur));
+    if (jpg) document.getElementById('fact-pct-jpeg').textContent =
+      ((jpg/count)*100).toFixed(1) + '%';
+  }
+  if (year_min && year_max) {
+    const span = year_max - year_min + 1;
+    document.getElementById('fact-years').textContent = span + (span===1?' year':' years');
+    document.getElementById('fact-years-desc').textContent =
+      `spanning ${year_min}–${year_max}`;
+  }
+}
+
+// ── System stats ────────────────────────────────────────────────────────
+async function fetchStats() {
+  try {
+    const d = await fetch('/api/stats').then(r => r.json());
+    const s = d.storage;
+    document.getElementById('disk-total').textContent = fmtBytes(s.total);
+    document.getElementById('disk-used').textContent  = fmtBytes(s.used);
+    document.getElementById('disk-free').textContent  = fmtBytes(s.free);
+    document.getElementById('disk-pct').textContent   = s.percent.toFixed(1) + '%';
+    const diskBar = document.getElementById('disk-bar');
+    diskBar.style.width = s.percent + '%';
+    diskBar.classList.toggle('warn', s.percent >= 75 && s.percent < 90);
+    diskBar.classList.toggle('danger', s.percent >= 90);
+    document.getElementById('fact-cpu').textContent   = d.cpu.toFixed(1) + '%';
+
+    const ut = fmtUptime(d.uptime);
+    uptimeEl.textContent = ut;
+    document.getElementById('fact-uptime2').textContent = ut;
+
+    const now = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    if (chartData.labels.length >= 30) {
+      chartData.labels.shift();
+      chartData.datasets[0].data.shift();
+    }
+    chartData.labels.push(now);
+    chartData.datasets[0].data.push(d.cpu);
+    cpuChart.update();
+  } catch(e) { console.error('stats:', e); }
+}
+
+// ── Now Playing ─────────────────────────────────────────────────────────
+function renderPhotoCard(metaEl, placeholderEl, cardEl, photo) {
+  if (!photo || photo.error) {
+    placeholderEl.style.display = 'flex';
+    placeholderEl.innerHTML = '<span style="opacity:.5">No photo</span>';
+    metaEl.innerHTML = '';
+    // Remove any lingering thumbnail
+    const oldImg = cardEl.querySelector('img.photo-thumb');
+    if (oldImg) oldImg.remove();
+    return;
+  }
+
+  const existing = cardEl.querySelector('img.photo-thumb');
+  const newSrc = `/api/photo/thumb?path=${encodeURIComponent(photo.path)}`;
+  if (existing) {
+    if (existing.dataset.src !== newSrc) { existing.dataset.src = newSrc; existing.src = newSrc; }
+  } else {
+    const img = document.createElement('img');
+    img.className = 'photo-thumb';
+    img.dataset.src = newSrc;
+    img.src = newSrc;
+    img.alt = photo.filename || '';
+    img.loading = 'lazy';
+    img.onerror = () => { img.style.display='none'; placeholderEl.style.display='flex'; };
+    placeholderEl.style.display = 'none';
+    placeholderEl.insertAdjacentElement('afterend', img);
+  }
+
+  const rows = [];
+  if (photo.filename) rows.push(`<div class="photo-meta-name" title="${esc(photo.path)}">${esc(photo.filename)}</div>`);
+  if (photo.album)    rows.push(`<div class="photo-meta-row">${esc(photo.album)}</div>`);
+  if (photo.date_taken) {
+    const d = photo.date_taken.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3');
+    if (d) rows.push(`<div class="photo-meta-row">${esc(d)}</div>`);
+  }
+  if (photo.dimensions)
+    rows.push(`<div class="photo-meta-row">${photo.dimensions.w} × ${photo.dimensions.h}</div>`);
+  if (photo.size_bytes)
+    rows.push(`<div class="photo-meta-row">${fmtBytes(photo.size_bytes)}</div>`);
+  if (photo.camera)
+    rows.push(`<div class="photo-meta-row">${esc(photo.camera)}</div>`);
+
+  const exp = [];
+  if (photo.aperture) exp.push(`f/${photo.aperture}`);
+  if (photo.shutter)  exp.push(String(photo.shutter));
+  if (photo.iso)      exp.push(`ISO ${photo.iso}`);
+  if (exp.length)     rows.push(`<div class="photo-meta-row">${exp.join(' · ')}</div>`);
+
+  if (photo.gps) {
+    const {lat, lon} = photo.gps;
+    const url = `https://www.google.com/maps?q=${lat},${lon}`;
+    rows.push(`<div class="photo-meta-row"><a href="${url}" target="_blank" rel="noopener">${lat.toFixed(4)}, ${lon.toFixed(4)}</a></div>`);
+  }
+
+  metaEl.innerHTML = rows.join('');
+}
+
+async function fetchCurrentPhoto() {
+  try {
+    const d = await fetch('/api/currentphoto').then(r => r.json());
+    if (d.total === 0 || d.error) {
+      // Show friendly empty state
+      ['meta-prev','meta-curr','meta-next'].forEach(id => {
+        document.getElementById(id).innerHTML = '';
+      });
+      document.getElementById('curr-placeholder').innerHTML =
+        '<div class="empty-state"><div class="empty-state-icon">&#128247;</div>' +
+        '<div class="empty-state-text">No photos yet</div>' +
+        '<div class="empty-state-hint">Add photos to ~/pictures to get started</div></div>';
+      document.getElementById('curr-placeholder').style.display = 'flex';
+      document.getElementById('prev-placeholder').innerHTML = '<span style="opacity:.5">—</span>';
+      document.getElementById('prev-placeholder').style.display = 'flex';
+      document.getElementById('next-placeholder').innerHTML = '<span style="opacity:.5">—</span>';
+      document.getElementById('next-placeholder').style.display = 'flex';
+      return;
+    }
+    renderPhotoCard(document.getElementById('meta-curr'), document.getElementById('curr-placeholder'), document.getElementById('card-curr'), d.current);
+    renderPhotoCard(document.getElementById('meta-prev'), document.getElementById('prev-placeholder'), document.getElementById('card-prev'), d.previous);
+    renderPhotoCard(document.getElementById('meta-next'), document.getElementById('next-placeholder'), document.getElementById('card-next'), d.next);
+
+    if (d.total > 0) {
+      document.getElementById('photo-index-label').textContent = `#${d.index + 1}`;
+      document.getElementById('photo-total-label').textContent = `of ${fmtNum(d.total)}`;
+      document.getElementById('photo-progress-bar').style.width =
+        ((d.index + 1) / d.total * 100) + '%';
+    }
+  } catch(e) { console.error('currentphoto:', e); }
+}
+
+// ── World Map ────────────────────────────────────────────────────────────
+let leafletMap, tileLayer, markerLayer;
+
+const TILES = {
+  light: { url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+           attr: '© <a href="https://openstreetmap.org">OpenStreetMap</a>' },
+  dark:  { url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+           attr: '© <a href="https://openstreetmap.org">OpenStreetMap</a> © <a href="https://carto.com">CARTO</a>' },
+};
+
+function initMap() {
+  leafletMap  = L.map('photo-map', { zoomControl: true, attributionControl: true }).setView([20, 0], 2);
+  markerLayer = L.layerGroup().addTo(leafletMap);
+  const dark  = document.documentElement.classList.contains('dark');
+  const t     = TILES[dark ? 'dark' : 'light'];
+  tileLayer   = L.tileLayer(t.url, { attribution: t.attr, maxZoom: 19 }).addTo(leafletMap);
+}
+
+function updateMapTheme(dark) {
+  if (!leafletMap || !tileLayer) return;
+  const t = TILES[dark ? 'dark' : 'light'];
+  tileLayer.remove();
+  tileLayer = L.tileLayer(t.url, { attribution: t.attr, maxZoom: 19 }).addTo(leafletMap);
+}
+
+let renderedPointCount = 0;
+let currentPhotoMarker = null;
+
+function buildPopup(p) {
+  return [
+    p.filename   ? `<b>${esc(p.filename)}</b>` : '',
+    p.album      ? esc(p.album) : '',
+    p.camera     ? esc(p.camera) : '',
+    p.date_taken ? esc(p.date_taken.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')) : '',
+  ].filter(Boolean).join('<br>');
+}
+
+async function fetchSessionPoints() {
+  try {
+    const data = await fetch('/api/sessionpoints').then(r => r.json());
+    const pts = data.points;
+    const current = data.current;
+
+    if (pts.length !== renderedPointCount) {
+      const newPts = pts.slice(renderedPointCount);
+      newPts.forEach(p => {
+        const isDark = document.documentElement.classList.contains('dark');
+        const marker = L.circleMarker([p.lat, p.lon], {
+          radius: 6,
+          fillColor:   isDark ? '#60a5fa' : '#2563eb',
+          color:       isDark ? '#0d1727' : '#ffffff',
+          weight: 2,
+          fillOpacity: 0.7,
+        });
+        marker.bindPopup(buildPopup(p));
+        marker.addTo(markerLayer);
+      });
+
+      renderedPointCount = pts.length;
+      document.getElementById('map-count').textContent =
+        `${pts.length} location${pts.length !== 1 ? 's' : ''} tracked this session`;
+    }
+
+    // Update the current-photo marker
+    const isDark = document.documentElement.classList.contains('dark');
+    if (current) {
+      if (currentPhotoMarker) {
+        currentPhotoMarker.setLatLng([current.lat, current.lon]);
+        currentPhotoMarker.setPopupContent(buildPopup(current));
+      } else {
+        currentPhotoMarker = L.circleMarker([current.lat, current.lon], {
+          radius: 10,
+          fillColor:   isDark ? '#fbbf24' : '#f59e0b',
+          color:       '#fff',
+          weight: 3,
+          fillOpacity: 1,
+          className:   'current-photo-pulse',
+        });
+        currentPhotoMarker.bindPopup(buildPopup(current));
+        currentPhotoMarker.addTo(leafletMap);
+      }
+      // Keep colors in sync with theme
+      currentPhotoMarker.setStyle({
+        fillColor: isDark ? '#fbbf24' : '#f59e0b',
+      });
+    } else if (currentPhotoMarker) {
+      currentPhotoMarker.remove();
+      currentPhotoMarker = null;
+    }
+  } catch(e) { console.error('sessionpoints:', e); }
+}
+
+document.getElementById('map-clear').addEventListener('click', async () => {
+  await fetch('/api/clearsession', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+  markerLayer.clearLayers();
+  if (currentPhotoMarker) { currentPhotoMarker.remove(); currentPhotoMarker = null; }
+  renderedPointCount = 0;
+  document.getElementById('map-count').textContent = '0 locations tracked';
+  toast('Session cleared', 'Location history reset', 'info');
+});
+
+// ── CPU Chart ─────────────────────────────────────────────────────────────
+let cpuChart;
+const chartData = {
+  labels: [],
+  datasets: [{
+    label: 'CPU %',
+    data: [],
+    borderColor: 'rgb(75,192,192)',
+    backgroundColor: 'rgba(75,192,192,0.12)',
+    tension: 0.35,
+    pointRadius: 2,
+    borderWidth: 2,
+  }],
+};
+
+function chartColors(dark) {
+  return {
+    grid:  dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)',
+    ticks: dark ? '#94a3b8' : '#64748b',
+  };
+}
+function updateChartTheme(dark) {
+  if (!cpuChart) return;
+  const c = chartColors(dark);
+  for (const axis of Object.values(cpuChart.options.scales)) {
+    axis.grid.color = c.grid; axis.ticks.color = c.ticks;
+  }
+  cpuChart.update('none');
+}
+function initChart() {
+  const dark = document.documentElement.classList.contains('dark');
+  const c = chartColors(dark);
+  cpuChart = new Chart(document.getElementById('utilizationChart'), {
+    type: 'line', data: chartData,
+    options: {
+      responsive: true,
+      animation: { duration: 250 },
+      plugins: { legend: { labels: { color: c.ticks, boxWidth: 12, font: { size: 11 } } } },
+      scales: {
+        x: { grid: { color: c.grid }, ticks: { color: c.ticks, maxTicksLimit: 6, font: { size: 10 } } },
+        y: { beginAtZero: true, max: 100,
+             grid: { color: c.grid },
+             ticks: { color: c.ticks, font: { size: 10 }, callback: v => v + '%' } },
+      },
+    },
+  });
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+window.addEventListener('load', () => {
+  const saved = localStorage.getItem(THEME_KEY);
+  applyTheme(saved || getSystemTheme());
+  initChart();
+  initMap();
+  fetchStatus();
+  fetchHostname();
+  fetchStats();
+  fetchPhotoInfo();
+  fetchCurrentPhoto();
+  fetchSessionPoints();
+  fetchYears();
+  fetchLocations();
+  fetchScheduleStatus();
+
+  setInterval(fetchStatus,        3000);
+  setInterval(fetchStats,         5000);
+  setInterval(fetchPhotoInfo,    60000);
+  setInterval(fetchSessionPoints, 8000);
+
+  // Poll current photo at the slide duration rate (re-schedule when duration changes)
+  let photoInterval = null;
+  function schedulePhotoPoll() {
+    if (photoInterval) clearInterval(photoInterval);
+    const dur = (lastConfirmedDuration || parseInt(durationEl.value, 10) || 5) * 1000;
+    photoInterval = setInterval(fetchCurrentPhoto, dur);
+  }
+  schedulePhotoPoll();
+  // Re-schedule whenever duration changes
+  durationEl.addEventListener('change', schedulePhotoPoll);
+  // Also re-schedule after status fetch updates lastConfirmedDuration
+  const origApplyStatus = applyStatus;
+  applyStatus = function(body) {
+    const prevDur = lastConfirmedDuration;
+    origApplyStatus(body);
+    if (lastConfirmedDuration !== prevDur) schedulePhotoPoll();
+  };
+  // Poll year index until ready (it builds in background on first run)
+  const yearPoll = setInterval(async () => {
+    await fetchYears();
+    if (_yearReady) clearInterval(yearPoll);
+  }, 8000);
+  // Same for the location index — first build can take much longer.
+  const locPoll = setInterval(async () => {
+    await fetchLocations();
+    if (_locReady) clearInterval(locPoll);
+  }, 10000);
+});
+</script>
+</body>
+</html>
