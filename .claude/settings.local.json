@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/joseph/vscode/server.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(curl -s http://127.0.0.1:8000/api/schedule/status)",
+      "Bash(curl -s http://127.0.0.1:8000/api/status)",
+      "Bash(kill 2227825)"
+    ]
+  }
+}
