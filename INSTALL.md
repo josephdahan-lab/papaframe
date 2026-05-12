@@ -262,18 +262,23 @@ rm -rf ~/papaframe
 ## Appendix: Original Pi Zero (armv6) notes
 
 The first-gen Pi Zero / Zero W is **armv6**, single-core, 512 MB RAM. Pip
-wheels for Pillow / `reverse_geocoder` are not published for armv6, so the
-installer will compile them from source — expect **30–60 minutes** for that
-step alone, and watch out for OOM during the Pillow build.
+wheels for Pillow are not published for armv6, so the installer will
+compile Pillow from source — expect a long build and watch out for OOM.
 
-Workarounds if you hit trouble:
+`reverse_geocoder` depends on **scipy**, which has no armv6 wheels and is
+not realistically buildable on a Pi Zero (it OOMs / runs for hours and
+still fails). Skip it on this hardware — the offline location lookup
+feature simply stays disabled, and the rest of PapaFrame runs fine. The
+server already handles `reverse_geocoder` being absent (see
+[server.py:23-29](server.py#L23-L29)).
 
-1. **Use Debian's pre-built Python packages** instead of pip:
+Recommended setup:
+
+1. **Use Debian's pre-built Python packages** instead of pip, and don't
+   install `reverse_geocoder`:
    ```bash
    sudo apt install python3-flask python3-pil python3-psutil python3-pycountry
-   # reverse_geocoder still has to come from pip; it's small.
    python3 -m venv --system-site-packages ~/papaframe/.venv
-   ~/papaframe/.venv/bin/pip install reverse_geocoder
    ```
    then re-run `scripts/install.sh` (it'll skip the venv since it exists).
 
@@ -286,5 +291,6 @@ Workarounds if you hit trouble:
    ```
 
 3. **Pi Zero 2 W** (armv7l/aarch64, quad-core, same 512 MB) doesn't have
-   any of these problems — wheels exist, builds aren't needed. Strongly
-   recommended over the original Zero if you have the choice.
+   any of these problems — wheels exist, builds aren't needed, and
+   `reverse_geocoder` installs cleanly. Strongly recommended over the
+   original Zero if you have the choice.
