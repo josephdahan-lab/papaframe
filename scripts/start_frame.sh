@@ -13,7 +13,16 @@ fi
 
 # ── Environment detection (console vs X11, framebuffer, writable VT) ─────────
 detect_desktop_environment() { [ -n "$DISPLAY" ] && echo "x11" || echo "console"; }
-detect_framebuffer() { [ -c /dev/fb0 ] && echo "/dev/fb0" || echo "none"; }
+detect_framebuffer() {
+    if [ -c /dev/fb0 ]; then
+        echo "/dev/fb0"
+    elif ls /dev/dri/card* >/dev/null 2>&1; then
+        # KMS-only (no legacy fbdev): fbi can still draw via DRM
+        echo "drm"
+    else
+        echo "none"
+    fi
+}
 detect_available_vt() {
     for v in "${1:-1}" 1 2 3 4 5 6 7; do
         [ -w "/dev/tty$v" ] && { echo "$v"; return 0; }
