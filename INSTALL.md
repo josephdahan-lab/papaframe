@@ -98,11 +98,14 @@ sudo bash scripts/install.sh
 ```
 
 The script is idempotent — re-run it any time to recover from a botched
-install or to migrate after moving the repo. It does:
+install or to migrate after moving the repo. It is also **hardware-aware**:
+it detects the board's architecture and RAM and tailors the install (see the
+[Pi Zero appendix](#appendix-original-pi-zero-armv6-notes)). It prints what it
+detected and which path it's taking before step 1. It does:
 
-| Step | What                                                              |
-| ---- | ----------------------------------------------------------------- |
-| 1    | `apt install` — `fbi`, Python venv tools, Pillow build deps       |
+| Step | What                                                                      |
+| ---- | ------------------------------------------------------------------------- |
+| 1    | `apt install` — `fbi`, Python venv tools (+ Pillow build deps on armv6)   |
 | 2    | Adds you to the `video` group                                     |
 | 3    | Creates `.venv/` next to `server.py` and installs requirements    |
 | 4    | Installs `/usr/local/bin/papaframe-screen` + passwordless sudoers |
@@ -256,41 +259,36 @@ rm -rf ~/papaframe
 | Web UI 502 / not reachable | server crashed | `journalctl -u papaframe-server -n 200` |
 | Screen on/off does nothing | sudoers rule missing or connector path wrong | `sudo /usr/local/bin/papaframe-screen off` to test directly |
 | Pillow install hangs forever | building from source on slow Pi | Be patient, or `sudo apt install python3-pillow` and recreate the venv with `--system-site-packages` |
+| pip `IncompleteRead` / `Connection broken` | network dropped mid-download | Re-run the installer — pip retries 10×; persistent failures mean the network is cutting the connection |
 
 ---
 
 ## Appendix: Original Pi Zero (armv6) notes
 
-The first-gen Pi Zero / Zero W is **armv6**, single-core, 512 MB RAM. Pip
-wheels for Pillow are not published for armv6, so the installer will
-compile Pillow from source — expect a long build and watch out for OOM.
+The first-gen Pi Zero / Zero W is **armv6**, single-core, 512 MB RAM — the
+slowest board PapaFrame supports. pip publishes no wheels for armv6, so
+Pillow has to be compiled from source.
 
-`reverse_geocoder` depends on **scipy**, which has no armv6 wheels and is
-not realistically buildable on a Pi Zero (it OOMs / runs for hours and
-still fails). Skip it on this hardware — the offline location lookup
-feature simply stays disabled, and the rest of PapaFrame runs fine. The
-server already handles `reverse_geocoder` being absent (see
-[server.py:23-29](server.py#L23-L29)).
+**The installer detects this automatically.** When `scripts/install.sh`
+sees an armv6 board it will, with no extra steps from you:
 
-Recommended setup:
+- install Debian's prebuilt `python3-pil` / `python3-flask` /
+  `python3-psutil` / `python3-pycountry` and build the venv with
+  `--system-site-packages`, so those don't all compile from source;
+- grow swap to 512 MB via `dphys-swapfile` so the Pillow C build doesn't
+  get OOM-killed;
+- skip `reverse_geocoder` — it depends on **scipy**, which has no armv6
+  wheels and won't realistically build on a Pi Zero (it OOMs / runs for
+  hours and still fails). The offline location lookup feature simply stays
+  disabled; the server already handles `reverse_geocoder` being absent (see
+  [server.py:23-29](server.py#L23-L29)).
 
-1. **Use Debian's pre-built Python packages** instead of pip, and don't
-   install `reverse_geocoder`:
-   ```bash
-   sudo apt install python3-flask python3-pil python3-psutil python3-pycountry
-   python3 -m venv --system-site-packages ~/papaframe/.venv
-   ```
-   then re-run `scripts/install.sh` (it'll skip the venv since it exists).
+So on an armv6 board the install is still just
+`sudo bash scripts/install.sh` — just expect the Pillow build to take a
+while. The installer prints `plan: armv6 — …` in its header so you can
+confirm it took this path.
 
-2. **Add swap** so the Pillow C build doesn't OOM-kill:
-   ```bash
-   sudo dphys-swapfile swapoff
-   sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=512/' /etc/dphys-swapfile
-   sudo dphys-swapfile setup
-   sudo dphys-swapfile swapon
-   ```
-
-3. **Pi Zero 2 W** (armv7l/aarch64, quad-core, same 512 MB) doesn't have
-   any of these problems — wheels exist, builds aren't needed, and
-   `reverse_geocoder` installs cleanly. Strongly recommended over the
-   original Zero if you have the choice.
+**Pi Zero 2 W** (armv7l/aarch64, quad-core, same 512 MB) has none of these
+problems — wheels exist, nothing compiles, and `reverse_geocoder` installs
+cleanly. Strongly recommended over the original Zero if you have the
+choice.

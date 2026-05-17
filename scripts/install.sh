@@ -2,7 +2,8 @@
 # PapaFrame system installer for Raspberry Pi (or any Debian-based Linux).
 #
 # What this does:
-#   1. Installs apt packages (fbi, build deps for Pillow, python venv tools)
+#   1. Installs apt packages (fbi, python venv tools; Pillow build deps only
+#      on boards that need them — see "Hardware-aware" below)
 #   2. Adds the install user to the `video` group (needed for /dev/fb0, /dev/dri)
 #   3. Creates .venv next to server.py and pip-installs requirements.txt
 #   4. Installs scripts/papaframe-screen → /usr/local/bin and the sudoers rule
@@ -21,6 +22,14 @@
 #   sudo bash scripts/install.sh
 #
 # Idempotent — safe to re-run.
+#
+# Hardware-aware — the installer detects the board (arch / RAM) and adapts:
+#   • armv6 (original Pi Zero / Pi 1): no prebuilt pip wheels exist, so it
+#     installs Pillow build deps + Debian's python3-* packages, builds the
+#     venv with --system-site-packages, grows swap for the from-source Pillow
+#     build, and skips reverse_geocoder (its scipy dependency has no armv6
+#     wheels and will not build on a Pi Zero).
+#   • Everything newer (Pi Zero 2 W, Pi 3/4/5): installs straight from wheels.
 
 set -e
 
@@ -39,10 +48,73 @@ fi
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 [ -d "$TARGET_HOME" ] || { echo "Cannot find home dir for $TARGET_USER" >&2; exit 1; }
 
+# ── Hardware detection ──────────────────────────────────────────────────────
+# Decides which install path to take. armv6 (original Pi Zero / Pi 1) has no
+# prebuilt pip wheels for Pillow or scipy; everything newer installs from
+# wheels with no compiling.
+ARCH="$(uname -m)"
+
+PI_MODEL="unknown board"
+for f in /sys/firmware/devicetree/base/model /proc/device-tree/model; do
+    if [ -r "$f" ]; then
+        PI_MODEL="$(tr -d '\0' < "$f")"
+        break
+    fi
+done
+
+RAM_MB=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 1024 ))
+
+if [ "$ARCH" = "armv6l" ]; then
+    HAS_WHEELS=0          # no Pillow/scipy wheels for armv6
+    WANT_GEOCODER=0       # reverse_geocoder needs scipy — unbuildable here
+    PLAN_DESC="armv6 — build Pillow from source, reuse Debian Python packages"
+else
+    HAS_WHEELS=1
+    WANT_GEOCODER=1
+    PLAN_DESC="prebuilt wheels available — straight pip install"
+fi
+
+# Low-RAM boards need swap so a from-source Pillow build is not OOM-killed.
+if [ "$RAM_MB" -lt 1024 ]; then LOW_RAM=1; else LOW_RAM=0; fi
+
+# Display stack — informational only; config.sh FBI_DEVICE=auto handles both.
+if [ -e /dev/fb0 ]; then
+    DISPLAY_HINT="/dev/fb0 present (legacy framebuffer)"
+elif [ -d /dev/dri ]; then
+    DISPLAY_HINT="KMS/DRM only, no /dev/fb0"
+else
+    DISPLAY_HINT="no framebuffer or DRM device — check the display cable/driver"
+fi
+
+# Grow swap to at least <MB> via dphys-swapfile (Raspberry Pi OS default).
+ensure_swap() {
+    local want_mb="$1" cur_mb
+    cur_mb=$(( $(awk '/^SwapTotal:/ {print $2}' /proc/meminfo) / 1024 ))
+    if [ "$cur_mb" -ge "$want_mb" ]; then
+        echo "       Swap is ${cur_mb} MB (≥ ${want_mb} MB) — leaving alone."
+        return
+    fi
+    if ! command -v dphys-swapfile >/dev/null; then
+        echo "       WARNING: ${cur_mb} MB swap and no dphys-swapfile to grow it."
+        echo "                The Pillow build may run out of memory — add swap"
+        echo "                manually, then re-run this installer."
+        return
+    fi
+    echo "       Growing swap ${cur_mb} → ${want_mb} MB for the Pillow build…"
+    dphys-swapfile swapoff || true
+    sed -i "s/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=${want_mb}/" /etc/dphys-swapfile
+    dphys-swapfile setup
+    dphys-swapfile swapon
+}
+
 echo "═══════════════════════════════════════════════════"
 echo "  PapaFrame installer"
-echo "    repo: $REPO_ROOT"
-echo "    user: $TARGET_USER  (home: $TARGET_HOME)"
+echo "    repo:    $REPO_ROOT"
+echo "    user:    $TARGET_USER  (home: $TARGET_HOME)"
+echo "    board:   $PI_MODEL"
+echo "    arch:    $ARCH, ${RAM_MB} MB RAM"
+echo "    display: $DISPLAY_HINT"
+echo "    plan:    $PLAN_DESC"
 echo "═══════════════════════════════════════════════════"
 echo
 
@@ -50,11 +122,19 @@ echo
 echo "[1/8] Installing system packages…"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y --no-install-recommends \
-    fbi \
-    python3 python3-venv python3-pip python3-dev \
-    libjpeg-dev zlib1g-dev libfreetype-dev \
-    git curl ca-certificates
+
+APT_PKGS=(fbi python3 python3-venv python3-pip git curl ca-certificates)
+if [ "$HAS_WHEELS" -eq 0 ]; then
+    # No wheels → Pillow compiles from source: needs headers + build tooling.
+    # Debian's python3-* packages are reused by the venv (step 3) so the heavy
+    # libraries do not all have to build from scratch.
+    APT_PKGS+=(python3-dev libjpeg-dev zlib1g-dev libfreetype-dev)
+    APT_PKGS+=(python3-pil python3-flask python3-psutil python3-pycountry)
+    echo "       armv6 board — adding Pillow build deps + Debian Python packages."
+else
+    echo "       Wheels available — skipping Pillow build dependencies."
+fi
+apt-get install -y --no-install-recommends "${APT_PKGS[@]}"
 
 # ── 2. video group ──────────────────────────────────────────────────────────
 echo "[2/8] Adding $TARGET_USER to video group…"
@@ -62,12 +142,44 @@ usermod -aG video "$TARGET_USER"
 
 # ── 3. Python venv + requirements ───────────────────────────────────────────
 echo "[3/8] Creating Python venv at $REPO_ROOT/.venv…"
-if [ ! -d "$REPO_ROOT/.venv" ]; then
-    sudo -u "$TARGET_USER" python3 -m venv "$REPO_ROOT/.venv"
+VENV_ARGS=()
+if [ "$HAS_WHEELS" -eq 0 ]; then
+    # Let the venv see Debian's python3-pil/flask/psutil/pycountry instead of
+    # building them all from source.
+    VENV_ARGS+=(--system-site-packages)
 fi
-echo "       Installing Python requirements (this can take a while on Pi Zero)…"
-sudo -u "$TARGET_USER" "$REPO_ROOT/.venv/bin/pip" install --upgrade --quiet pip wheel
-sudo -u "$TARGET_USER" "$REPO_ROOT/.venv/bin/pip" install --quiet -r "$REPO_ROOT/requirements.txt"
+if [ ! -d "$REPO_ROOT/.venv" ]; then
+    sudo -u "$TARGET_USER" python3 -m venv "${VENV_ARGS[@]}" "$REPO_ROOT/.venv"
+fi
+
+# A from-source Pillow build OOM-kills on a 512 MB board without swap.
+if [ "$HAS_WHEELS" -eq 0 ] && [ "$LOW_RAM" -eq 1 ]; then
+    ensure_swap 512
+fi
+
+PIP="$REPO_ROOT/.venv/bin/pip"
+# --retries/--timeout: a single dropped connection on Pi Wi-Fi should not abort
+# the whole install. --prefer-binary: take a wheel over an sdist when offered.
+PIP_NET=(--retries 10 --timeout 120 --prefer-binary)
+echo "       Upgrading pip + wheel…"
+sudo -u "$TARGET_USER" "$PIP" install --upgrade --quiet "${PIP_NET[@]}" pip wheel
+
+REQ_FILE="$REPO_ROOT/requirements.txt"
+if [ "$WANT_GEOCODER" -eq 0 ]; then
+    # reverse_geocoder pulls scipy, which has no armv6 wheels and will not
+    # build on a Pi Zero. server.py already runs fine without it.
+    echo "       Skipping reverse_geocoder (needs scipy — no armv6 wheels)."
+    REQ_FILE="$(mktemp)"
+    grep -vi '^reverse_geocoder' "$REPO_ROOT/requirements.txt" > "$REQ_FILE"
+    chmod 0644 "$REQ_FILE"
+fi
+if [ "$HAS_WHEELS" -eq 0 ]; then
+    echo "       Installing Python requirements (Pillow builds from source — slow)…"
+else
+    echo "       Installing Python requirements…"
+fi
+sudo -u "$TARGET_USER" "$PIP" install --quiet "${PIP_NET[@]}" -r "$REQ_FILE"
+if [ "$WANT_GEOCODER" -eq 0 ]; then rm -f "$REQ_FILE"; fi
 
 # ── 4. Screen helper + sudoers ──────────────────────────────────────────────
 echo "[4/8] Installing /usr/local/bin/papaframe-screen + sudoers rule…"
