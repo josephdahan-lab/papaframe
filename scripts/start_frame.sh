@@ -1,5 +1,5 @@
 #!/bin/bash
-
+exec > /tmp/start_frame_debug.log 2>&1
 # Resolve script + repo root so relative paths work regardless of cwd.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

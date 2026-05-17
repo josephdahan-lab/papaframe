@@ -21,7 +21,8 @@
 # ~ and $VARS are expanded by both server.py and start_frame.sh.
 # Example (multiple roots):
 #   PHOTO_DIRS="$HOME/Pictures:/mnt/nas/Photos"
-PHOTO_DIRS="$HOME/Pictures"
+#PHOTO_DIRS="$HOME/Pictures"
+PHOTO_DIRS="/mnt/plex/Pictures"
 
 # ── Photo cache ───────────────────────────────────────────────────
 # PapaFrame can keep a local cache of upcoming photos, resized down to
