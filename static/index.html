@@ -179,6 +179,23 @@
         </div>
       </div>
 
+      <!-- Photo cache card -->
+      <div class="card">
+        <div class="section-title">Photo Cache</div>
+        <div class="cache-content">
+          <div class="disk-rows">
+            <div class="disk-kv"><span class="key">Status</span> <span class="value" id="cache-state">—</span></div>
+            <div class="disk-kv"><span class="key">Photos</span> <span class="value" id="cache-count">—</span></div>
+            <div class="disk-kv"><span class="key">Used</span>   <span class="value" id="cache-used">—</span></div>
+            <div class="disk-kv"><span class="key">Mode</span>   <span class="value" id="cache-mode">—</span></div>
+          </div>
+          <div class="disk-bar-wrap">
+            <div id="cache-bar" class="disk-bar" style="width:0%"></div>
+          </div>
+          <button id="cache-fill-btn" class="btn-apply">⚡ Fill cache now</button>
+        </div>
+      </div>
+
     </div><!-- /panel-left -->
 
     <!-- CENTER: Now Playing -->
@@ -1054,6 +1071,52 @@ async function fetchStats() {
   } catch(e) { console.error('stats:', e); }
 }
 
+// ── Photo cache ─────────────────────────────────────────────────────────
+async function fetchCacheStatus() {
+  try {
+    const c = await fetch('/api/cache/status').then(r => r.json());
+    const stateEl = document.getElementById('cache-state');
+    const fillBtn = document.getElementById('cache-fill-btn');
+    const bar     = document.getElementById('cache-bar');
+    if (!c.enabled) {
+      stateEl.textContent = 'Disabled';
+      document.getElementById('cache-count').textContent = '—';
+      document.getElementById('cache-used').textContent  = '—';
+      document.getElementById('cache-mode').textContent  = '—';
+      bar.style.width = '0%';
+      if (fillBtn) fillBtn.disabled = true;
+      return;
+    }
+    stateEl.textContent = c.filling ? 'Filling…' : 'Ready';
+    document.getElementById('cache-count').textContent =
+      c.count.toLocaleString() + ' photos';
+    document.getElementById('cache-used').textContent =
+      `${c.used_mb.toFixed(0)} / ${c.size_mb} MB`;
+    document.getElementById('cache-mode').textContent =
+      c.compress ? `Compressed (q${c.quality})` : 'Full size';
+    const pct = c.size_mb > 0 ? Math.min(100, (c.used_mb / c.size_mb) * 100) : 0;
+    bar.style.width = pct + '%';
+    bar.classList.toggle('warn', pct >= 75 && pct < 95);
+    bar.classList.toggle('danger', pct >= 95);
+    if (fillBtn) fillBtn.disabled = c.filling;
+  } catch(e) { console.error('cache:', e); }
+}
+
+async function fillCacheNow() {
+  const btn = document.getElementById('cache-fill-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const res  = await fetch('/api/cache/fill', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'fill failed');
+    toast('Cache fill started', 'Filling the photo cache in the background…', 'info');
+  } catch(e) {
+    toast('Cache fill failed', e.message, 'error');
+    if (btn) btn.disabled = false;
+  }
+  fetchCacheStatus();
+}
+
 // ── Now Playing ─────────────────────────────────────────────────────────
 function renderPhotoCard(metaEl, placeholderEl, cardEl, photo) {
   if (!photo || photo.error) {
@@ -1307,11 +1370,16 @@ window.addEventListener('load', () => {
   fetchYears();
   fetchLocations();
   fetchScheduleStatus();
+  fetchCacheStatus();
+
+  const cacheFillBtn = document.getElementById('cache-fill-btn');
+  if (cacheFillBtn) cacheFillBtn.addEventListener('click', fillCacheNow);
 
   setInterval(fetchStatus,        3000);
   setInterval(fetchStats,         5000);
   setInterval(fetchPhotoInfo,    60000);
   setInterval(fetchSessionPoints, 8000);
+  setInterval(fetchCacheStatus,   5000);
 
   // Poll current photo at the slide duration rate (re-schedule when duration changes)
   let photoInterval = null;

@@ -29,6 +29,13 @@
     .field .help {
       font-size: .82rem; opacity: .7; margin-top: .25rem;
     }
+    .field .bool-row {
+      display: flex; align-items: center; gap: .5rem;
+      font-weight: 400; cursor: pointer;
+    }
+    .field .bool-row input[type=checkbox] {
+      width: auto; margin: 0;
+    }
     .action-row {
       display: flex; gap: .5rem; flex-wrap: wrap; margin-top: 1.5rem;
     }
@@ -109,6 +116,18 @@ function esc(s) {
 }
 
 function renderField(f) {
+  if (f.type === 'bool') {
+    const on = ['yes','true','1','on'].includes(String(f.value).toLowerCase());
+    return `
+    <div class="field">
+      <label for="f-${f.key}">${esc(f.label)} <small style="opacity:.55;font-weight:400">(${f.key})</small></label>
+      <label class="bool-row">
+        <input id="f-${f.key}" name="${f.key}" type="checkbox" ${on ? 'checked' : ''}>
+        <span>Enabled</span>
+      </label>
+      <div class="help">${esc(f.help)}</div>
+    </div>`;
+  }
   const inputType = f.type === 'int' ? 'number' : 'text';
   return `
     <div class="field">
@@ -133,7 +152,9 @@ async function saveConfig(ev) {
   ev.preventDefault();
   const payload = {};
   for (const input of form.querySelectorAll('input[name]')) {
-    payload[input.name] = input.value;
+    payload[input.name] = input.type === 'checkbox'
+      ? (input.checked ? 'yes' : 'no')
+      : input.value;
   }
   try {
     const res = await fetch('/api/config', {

@@ -5,9 +5,11 @@ Controls and monitors a Raspberry Pi slideshow display.
 Integrates with start_frame.sh via control files in /tmp.
 """
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import psutil
 import subprocess
@@ -16,7 +18,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
-from PIL import Image
+from PIL import Image, ImageOps
 from PIL.ExifTags import TAGS
 import logging
 
@@ -79,6 +81,14 @@ CONFIG_SCHEMA = [
      'Path to start_frame.sh — the bash script that runs the viewer.'),
     ('LOG_FILE',          'str', 'Server log file',
      'Log output path (relative to server.py if not absolute).'),
+    ('CACHE_SIZE_MB',     'int', 'Photo cache size (MB)',
+     'Local cache budget in megabytes. 0 disables the cache.'),
+    ('CACHE_COMPRESS',    'bool', 'Compress cached photos',
+     'On: resize to fit 1920x1080 and re-encode as JPEG. Off: copy originals verbatim.'),
+    ('CACHE_QUALITY',     'int', 'Cache JPEG quality',
+     'JPEG quality 1-100 for compressed cache entries (ignored if compression is off).'),
+    ('CACHE_DIR',         'str', 'Cache folder',
+     'Where cached photos are stored (relative paths resolve from the repo root).'),
 ]
 
 def write_config(path, updates):
@@ -229,6 +239,12 @@ state = {
     'screen_scheduled_off': False,           # True while scheduler holds the screen off
     'slideshow_was_running_before_schedule': False,  # snapshot taken at pause time
     'last_scheduled_state': None,            # 'on' | 'off' | None — last applied transition
+    'cache': {                               # photo-cache worker status
+        'filling': False,        # True while a fill pass is running
+        'last_fill': None,       # epoch seconds of the last completed fill
+        'last_built': 0,         # photos (re)built on the last fill
+        'filled_this_window': False,  # already filled in the current off-window?
+    },
 }
 
 # ── Control-file helpers ──────────────────────────────────────────
@@ -672,6 +688,221 @@ def _start_scheduler():
     logger.info(f'Daily scheduler started (off {off[0]:02d}:{off[1]:02d}, '
                 f'on {on[0]:02d}:{on[1]:02d}, enabled={state["schedule_enabled"]})')
 
+# ── Photo cache ───────────────────────────────────────────────────
+# A local cache of upcoming photos, optionally resized to the display.
+# start_frame.sh substitutes cached copies into the viewer's file list
+# when they exist, so the slideshow stays fast and keeps running even
+# if the photo store goes offline. A background worker fills the cache
+# during the nightly screen-off window.
+CACHE_MAX_W, CACHE_MAX_H = 1920, 1080
+
+def _cache_settings():
+    """Read cache settings fresh from config.sh so admin-page edits apply
+    without a server restart."""
+    cfg = load_config(CONFIG_PATH)
+    def _int(key, default):
+        try:
+            return int(cfg.get(key, default))
+        except (TypeError, ValueError):
+            return default
+    raw_dir = os.path.expandvars(os.path.expanduser(cfg.get('CACHE_DIR', 'cache')))
+    cdir = Path(raw_dir)
+    if not cdir.is_absolute():
+        cdir = REPO_ROOT / cdir
+    return {
+        'size_mb':  max(0, _int('CACHE_SIZE_MB', 2048)),
+        'compress': str(cfg.get('CACHE_COMPRESS', 'yes')).strip().lower()
+                    in ('yes', 'true', '1', 'on'),
+        'quality':  min(100, max(1, _int('CACHE_QUALITY', 82))),
+        'dir':      cdir,
+    }
+
+def _cache_manifest_path(cdir):
+    return cdir / 'manifest.tsv'
+
+def _cache_key(src, mtime, compress, quality):
+    """Deterministic cache filename for a photo + settings. The settings are
+    folded into the hash, so toggling compression invalidates old entries."""
+    mode = f'q{quality}' if compress else 'raw'
+    digest = hashlib.sha1(
+        f'{src}|{int(mtime)}|{mode}'.encode('utf-8', 'replace')).hexdigest()
+    ext = '.jpg' if compress else (os.path.splitext(src)[1].lower() or '.jpg')
+    return f'{digest}{ext}'
+
+def _build_cache_entry(src, dst, compress, quality):
+    """Create one cache file. Compressed entries are resized to fit the
+    display and re-encoded as JPEG; uncompressed entries are verbatim copies.
+    Written via a .tmp file + rename so readers never see a partial file."""
+    tmp = dst.with_name(dst.name + '.tmp')
+    try:
+        if compress:
+            with Image.open(src) as im:
+                im = ImageOps.exif_transpose(im)    # bake in EXIF rotation
+                im = im.convert('RGB')
+                im.thumbnail((CACHE_MAX_W, CACHE_MAX_H), Image.LANCZOS)
+                im.save(tmp, 'JPEG', quality=quality, optimize=True)
+        else:
+            shutil.copy2(src, tmp)
+        tmp.replace(dst)
+        return True
+    except Exception as e:
+        logger.warning(f'Cache build failed for {src}: {e}')
+        tmp.unlink(missing_ok=True)
+        return False
+
+def _cache_usage(cdir):
+    """(total_bytes, file_count) of cache image files — manifest/.tmp excluded."""
+    total = count = 0
+    try:
+        for f in cdir.iterdir():
+            if (not f.is_file() or f.name == 'manifest.tsv'
+                    or f.name.endswith('.tmp')):
+                continue
+            try:
+                total += f.stat().st_size
+                count += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return total, count
+
+def _photo_order():
+    """Photos in display-priority order: the live shuffled list first (these
+    show soonest), then any remaining photos from the master list."""
+    seen = set()
+    order = []
+    for src in (LIVE_LIST, SOURCE_FILE):
+        try:
+            if not src.exists():
+                continue
+            for line in src.read_text().splitlines():
+                p = line.strip()
+                if p and p not in seen:
+                    seen.add(p)
+                    order.append(p)
+        except OSError:
+            pass
+    return order
+
+def _in_off_window():
+    """True when the daily schedule currently holds the screen off. False if
+    the schedule is disabled — there is then no defined 'night', so the cache
+    only fills on demand via the 'fill now' button."""
+    if not state.get('schedule_enabled', True):
+        return False
+    now = datetime.now()
+    return _should_be_off((now.hour, now.minute),
+                          state.get('screen_off_time', (23, 59)),
+                          state.get('screen_on_time', (6, 0)))
+
+def _fill_cache(force=False):
+    """Populate the cache up to the size budget, in display-priority order.
+    `force` (the manual 'fill now' button) ignores the off-window check;
+    otherwise the pass stops as soon as the screen comes back on, so it
+    never competes with the running slideshow for CPU."""
+    s = _cache_settings()
+    if s['size_mb'] <= 0:
+        return
+    cdir = s['dir']
+    try:
+        cdir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.error(f'Cannot create cache dir {cdir}: {e}')
+        return
+    if state['cache'].get('filling'):
+        return
+    state['cache']['filling'] = True
+    budget = s['size_mb'] * 1024 * 1024
+    built = 0
+    try:
+        used, _ = _cache_usage(cdir)
+        mapping = {}        # original path -> cache path
+        wanted = set()      # cache filenames to keep
+        for src in _photo_order():
+            if not force and not _in_off_window():
+                break       # screen back on — yield to the slideshow
+            try:
+                mtime = os.path.getmtime(src)
+            except OSError:
+                continue    # photo gone / unreadable
+            name = _cache_key(src, mtime, s['compress'], s['quality'])
+            dst = cdir / name
+            if dst.exists():
+                mapping[src] = str(dst)
+                wanted.add(name)
+                continue
+            if used >= budget:
+                break       # budget reached — the rest stay uncached
+            if _build_cache_entry(Path(src), dst, s['compress'], s['quality']):
+                mapping[src] = str(dst)
+                wanted.add(name)
+                built += 1
+                try:
+                    used += dst.stat().st_size
+                except OSError:
+                    pass
+        _evict_cache(cdir, wanted)
+        _write_cache_manifest(cdir, mapping)
+        b, n = _cache_usage(cdir)
+        state['cache'].update(last_fill=time.time(), last_built=built)
+        logger.info(f'Cache fill done: built {built}, holding {n} photos '
+                    f'/ {b // (1024 * 1024)} MB')
+    except Exception as e:
+        logger.error(f'Cache fill error: {e}')
+    finally:
+        state['cache']['filling'] = False
+
+def _evict_cache(cdir, wanted):
+    """Delete cache files not in `wanted` — stale settings, removed photos,
+    leftover .tmp files, and anything beyond the budget."""
+    try:
+        for f in cdir.iterdir():
+            if not f.is_file() or f.name == 'manifest.tsv':
+                continue
+            if f.name not in wanted:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+def _write_cache_manifest(cdir, mapping):
+    """Atomically write CACHE_DIR/manifest.tsv (original<TAB>cached). Only
+    entries whose cache file still exists are kept; start_frame.sh reads this
+    to substitute cached copies into the viewer's file list."""
+    mf = _cache_manifest_path(cdir)
+    lines = [f'{o}\t{c}' for o, c in mapping.items() if Path(c).exists()]
+    tmp = mf.with_name(mf.name + '.tmp')
+    try:
+        tmp.write_text('\n'.join(lines) + ('\n' if lines else ''))
+        tmp.replace(mf)
+    except OSError as e:
+        logger.error(f'Cannot write cache manifest: {e}')
+
+def _run_cache_worker():
+    """Background worker: fill the cache once per nightly off-window."""
+    while True:
+        try:
+            s = _cache_settings()
+            if s['size_mb'] > 0 and _in_off_window():
+                if not state['cache'].get('filled_this_window'):
+                    logger.info('Off-window reached — filling photo cache...')
+                    _fill_cache()
+                    state['cache']['filled_this_window'] = True
+            else:
+                state['cache']['filled_this_window'] = False
+        except Exception as e:
+            logger.error(f'Cache worker error: {e}')
+        time.sleep(60)
+
+def _start_cache_worker():
+    """Start the background photo-cache worker thread."""
+    t = threading.Thread(target=_run_cache_worker, daemon=True)
+    t.start()
+    logger.info('Photo cache worker started.')
+
 def _write_filtered_list(cc):
     """Write the location-filtered photo list to FILTERED_LIST."""
     paths = state['location_paths'].get(cc, [])
@@ -720,6 +951,9 @@ def api_config_set():
                 updates[key] = int(raw)
             except (TypeError, ValueError):
                 return jsonify({'error': f'{key} must be an integer'}), 400
+        elif typ == 'bool':
+            updates[key] = ('yes' if str(raw).strip().lower()
+                            in ('yes', 'true', '1', 'on') else 'no')
         else:
             updates[key] = str(raw)
     if not updates:
@@ -742,6 +976,39 @@ def api_config_rebuild():
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+# ── API: Photo cache ───────────────────────────────────────────────
+@app.route('/api/cache/status', methods=['GET'])
+def api_cache_status():
+    """Report cache configuration and current usage for the dashboard."""
+    s = _cache_settings()
+    used_bytes, count = _cache_usage(s['dir'])
+    return jsonify({
+        'enabled':   s['size_mb'] > 0,
+        'size_mb':   s['size_mb'],
+        'used_mb':   round(used_bytes / (1024 * 1024), 1),
+        'count':     count,
+        'compress':  s['compress'],
+        'quality':   s['quality'],
+        'dir':       str(s['dir']),
+        'filling':   bool(state['cache'].get('filling')),
+        'last_fill': state['cache'].get('last_fill'),
+        'last_built': state['cache'].get('last_built', 0),
+    })
+
+@app.route('/api/cache/fill', methods=['POST'])
+def api_cache_fill():
+    """Trigger a cache fill now, regardless of the schedule. Runs in the
+    background so the request returns immediately."""
+    s = _cache_settings()
+    if s['size_mb'] <= 0:
+        return jsonify({'error': 'cache is disabled (CACHE_SIZE_MB=0)'}), 400
+    if state['cache'].get('filling'):
+        return jsonify({'error': 'a cache fill is already running'}), 409
+    threading.Thread(target=lambda: _fill_cache(force=True),
+                     daemon=True).start()
+    logger.info('Manual cache fill requested.')
+    return jsonify({'success': True})
 
 # ── API: Status ────────────────────────────────────────────────────
 @app.route('/api/status', methods=['GET'])
@@ -1263,6 +1530,8 @@ if __name__ == '__main__':
     build_location_index()
     logger.info('Starting daily scheduler...')
     _start_scheduler()
+    logger.info('Starting photo cache worker...')
+    _start_cache_worker()
     logger.info(f'Server starting on http://{SERVER_HOST}:{SERVER_PORT}')
     print(f'Serving http://{SERVER_HOST}:{SERVER_PORT}')
     app.run(host=SERVER_HOST, port=SERVER_PORT, debug=False, use_reloader=False)

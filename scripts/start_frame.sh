@@ -55,6 +55,8 @@ resolve_repo_path() {
     esac
 }
 SOURCE_FILE="$(resolve_repo_path "${SOURCE_FILE:-photo_list.txt}")"
+CACHE_DIR="$(resolve_repo_path "${CACHE_DIR:-cache}")"
+CACHE_MANIFEST="$CACHE_DIR/manifest.tsv"
 PHOTO_DIRS="${PHOTO_DIRS:-$HOME/Pictures}"
 RESHUFFLE_INTERVAL="${RESHUFFLE_INTERVAL:-900}"
 DEFAULT_DURATION="${DEFAULT_DURATION:-5}"
@@ -118,6 +120,10 @@ fi
 echo "Environment: $DESKTOP_ENV | Framebuffer: $FRAMEBUFFER_DEVICE | VT: $AVAILABLE_VT | Viewer: $SELECTED_VIEWER"
 
 LIVE_LIST="/tmp/current_slideshow.txt"
+# DISPLAY_LIST mirrors LIVE_LIST but with cached copies substituted in where
+# the photo cache has them. The viewer reads DISPLAY_LIST; the server keeps
+# reading LIVE_LIST (originals) so photo metadata (EXIF date/GPS) stays intact.
+DISPLAY_LIST="/tmp/frame_display_list.txt"
 RESHUFFLE_PID_FILE="/tmp/frame_reshuffle.pid"
 DURATION_FILE="/tmp/frame_duration_override.txt"
 STOP_FLAG="/tmp/frame_stop_requested"
@@ -230,6 +236,24 @@ rotate_to_resume() {
     echo "Resuming from photo at line $LINE_NUM: $RESUME_PHOTO"
 }
 
+# ── Substitute cached photos into DISPLAY_LIST ───────────────────────────────
+# The viewer reads DISPLAY_LIST. Each line is either the original photo path
+# or — when the photo cache holds a copy — the cache path. Rebuilding this
+# before every viewer launch is what makes the cache/photo-store switch
+# seamless: it is just a different path string in the list, never a viewer
+# restart. With no cache (or no manifest) DISPLAY_LIST is a copy of LIVE_LIST.
+apply_cache_mapping() {
+    if [ -s "$CACHE_MANIFEST" ] && [ -s "$LIVE_LIST" ]; then
+        awk -F'\t' '
+            NR==FNR { if (NF>=2 && $2!="") m[$1]=$2; next }
+            { print ($0 in m) ? m[$0] : $0 }
+        ' "$CACHE_MANIFEST" "$LIVE_LIST" > "$DISPLAY_LIST" 2>/dev/null \
+            || cat "$LIVE_LIST" > "$DISPLAY_LIST" 2>/dev/null
+    else
+        cat "$LIVE_LIST" > "$DISPLAY_LIST" 2>/dev/null
+    fi
+}
+
 # ── Initial list setup ────────────────────────────────────────────────────────
 if [ -s "$SOURCE_FILE" ]; then
     echo "Found existing list. Shuffling..."
@@ -284,6 +308,10 @@ while true; do
     # Rotate list to resume photo (if set by server before kill/stop)
     rotate_to_resume
 
+    # Refresh DISPLAY_LIST so the viewer picks up any newly cached photos
+    # (and any LIVE_LIST changes from the background reshuffle / resume).
+    apply_cache_mapping
+
     # Write state for web UI
     VIEWER_START=$(date +%s)
     printf '{"started_at":%s,"duration":%s,"list_path":"%s","viewer":"%s"}\n' \
@@ -300,7 +328,7 @@ while true; do
                 -a -noverbose -readahead \
                 -t "$CUR_DURATION" \
                 -T "$FBI_VT" \
-                -l "$LIVE_LIST" </dev/tty"$FBI_VT" 2>/dev/null &
+                -l "$DISPLAY_LIST" </dev/tty"$FBI_VT" 2>/dev/null &
             VIEWER_PID=$!
             echo "fbi started (PID $VIEWER_PID) on vt$FBI_VT, device=${FBI_DEVICE:-default}, ${CUR_DURATION}s per photo"
             ;;
@@ -311,12 +339,12 @@ while true; do
                 feh --slideshow "$CUR_DURATION" \
                     --on-last-slide quit \
                     --fullscreen \
-                    -f "$LIVE_LIST" 2>/dev/null &
+                    -f "$DISPLAY_LIST" 2>/dev/null &
             else
                 # Fallback for console: feh on framebuffer
                 feh -Z --slideshow "$CUR_DURATION" \
                     --on-last-slide quit \
-                    -f "$LIVE_LIST" 2>/dev/null &
+                    -f "$DISPLAY_LIST" 2>/dev/null &
             fi
             VIEWER_PID=$!
             echo "feh started (PID $VIEWER_PID) at ${CUR_DURATION}s per photo"
@@ -326,7 +354,7 @@ while true; do
             export DISPLAY="${DISPLAY:-:0}"
             eog --slideshow \
                 --slideshow-timeout="$((CUR_DURATION * 1000))" \
-                "$(head -1 "$LIVE_LIST")" 2>/dev/null &
+                "$(head -1 "$DISPLAY_LIST")" 2>/dev/null &
             VIEWER_PID=$!
             echo "eog started (PID $VIEWER_PID) at ${CUR_DURATION}s per photo"
             ;;
@@ -335,7 +363,7 @@ while true; do
             export DISPLAY="${DISPLAY:-:0}"
             display -geometry +0+0 \
                 -delay "$CUR_DURATION"x1 \
-                "@$LIVE_LIST" 2>/dev/null &
+                "@$DISPLAY_LIST" 2>/dev/null &
             VIEWER_PID=$!
             echo "display started (PID $VIEWER_PID) at ${CUR_DURATION}s per photo"
             ;;

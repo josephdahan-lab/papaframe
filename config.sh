@@ -23,6 +23,31 @@
 #   PHOTO_DIRS="$HOME/Pictures:/mnt/nas/Photos"
 PHOTO_DIRS="$HOME/Pictures"
 
+# ── Photo cache ───────────────────────────────────────────────────
+# PapaFrame can keep a local cache of upcoming photos, resized down to
+# the display. The slideshow shows cached copies when they exist and
+# falls back to PHOTO_DIRS otherwise — switching between the two is
+# seamless and keeps the slideshow running even if the photo store
+# (e.g. a NAS) goes offline. The cache is filled during the nightly
+# screen-off window (see "Screen schedule" — set in the web UI).
+
+# Cache budget in megabytes. The cache never grows past this; the
+# oldest entries are evicted first. Set to 0 to disable caching.
+CACHE_SIZE_MB=2048
+
+# Compress cached photos. "yes" resizes each photo to fit 1920x1080
+# and re-encodes it as JPEG — far smaller, so the budget holds more
+# photos. "no" copies originals verbatim at full size.
+CACHE_COMPRESS="yes"
+
+# JPEG quality (1-100) for compressed cache entries. Ignored when
+# CACHE_COMPRESS="no". 82 is a good size/quality balance.
+CACHE_QUALITY=82
+
+# Where cached photos are stored. Relative paths resolve from the repo
+# root, so the default lands at ~/papaframe/cache.
+CACHE_DIR="cache"
+
 # ── Slideshow timing ──────────────────────────────────────────────
 # Default seconds per photo when the UI does not specify one.
 DEFAULT_DURATION=30

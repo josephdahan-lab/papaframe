@@ -37,6 +37,10 @@ page can edit in place.
 
 **Slideshow**
 - Recursive scan of one or more photo roots (`PHOTO_DIRS`, colon-separated).
+- Optional local **photo cache** — keeps upcoming photos on local disk
+  (resized to 1920×1080 by default), filled overnight. The slideshow shows
+  cached copies transparently and keeps running even if the photo store
+  (e.g. a NAS) goes offline. Size, compression, and quality are configurable.
 - Background reshuffle on a configurable interval (default 15 min).
 - Background pass to drop dead paths from the live list — important for
   network shares where files come and go.
@@ -133,6 +137,10 @@ when moving PapaFrame to a different frame.
 | Key                  | What it does                                         | Default                            |
 | -------------------- | ---------------------------------------------------- | ---------------------------------- |
 | `PHOTO_DIRS`         | Photo roots, colon-separated like `$PATH`            | `$HOME/Pictures`                   |
+| `CACHE_SIZE_MB`      | Local photo-cache budget in MB (`0` disables it)     | `2048`                             |
+| `CACHE_COMPRESS`     | `yes` = resize to 1080p + JPEG; `no` = copy verbatim | `yes`                              |
+| `CACHE_QUALITY`      | JPEG quality 1–100 when `CACHE_COMPRESS=yes`         | `82`                               |
+| `CACHE_DIR`          | Cache folder (relative paths anchor at repo root)    | `cache`                            |
 | `DEFAULT_DURATION`   | Seconds per photo when the UI doesn't override       | `30`                               |
 | `RESHUFFLE_INTERVAL` | Background reshuffle interval (seconds)              | `900`                              |
 | `FORCE_VIEWER`       | `auto`, `fbi`, `feh`, `eog`, or `display`            | `auto`                             |
@@ -144,9 +152,24 @@ when moving PapaFrame to a different frame.
 | `FRAME_SCRIPT`       | Path to `start_frame.sh`                             | `scripts/start_frame.sh`           |
 | `LOG_FILE`           | Server log path (relative paths anchor at repo root) | `frame_display.log`                |
 
-> Relative paths in `SOURCE_FILE`, `FRAME_SCRIPT`, and `LOG_FILE` resolve
-> from the repo root (the directory holding `server.py`). Absolute paths
-> are used as-is. `~` and `$VARS` are expanded.
+> Relative paths in `SOURCE_FILE`, `FRAME_SCRIPT`, `LOG_FILE`, and `CACHE_DIR`
+> resolve from the repo root (the directory holding `server.py`). Absolute
+> paths are used as-is. `~` and `$VARS` are expanded.
+
+### Photo cache
+
+When `CACHE_SIZE_MB` is non-zero, a background worker copies upcoming photos
+into `CACHE_DIR` during the nightly screen-off window (the same schedule shown
+on the dashboard). With `CACHE_COMPRESS=yes` each photo is resized to fit
+1920×1080 and re-encoded as JPEG — roughly 200–400 KB each, so 2 GB holds
+~5,000–10,000 photos; with `CACHE_COMPRESS=no` originals are copied verbatim.
+
+The slideshow shows a cached copy whenever one exists and falls back to the
+original otherwise — the swap is just a different path in the viewer's file
+list, never a restart, so it is seamless. A useful side effect: if the photo
+store is a NAS that goes offline, the slideshow keeps running from the cache.
+The **Photo Cache** card on the dashboard shows usage and has a *Fill cache
+now* button; cache settings are also editable on the `/admin` page.
 
 ### Two ways to edit it
 
@@ -293,6 +316,10 @@ script against.
 - `POST /api/config` — write back to `config.sh` (comments preserved).
 - `POST /api/config/rebuild` — regenerate the master photo list.
 
+**Cache**
+- `GET  /api/cache/status` — enabled flag, size budget, usage, photo count.
+- `POST /api/cache/fill` — trigger a cache fill now (runs in the background).
+
 **Stats**
 - `GET  /api/stats`
 - `GET  /api/sessionpoints`
@@ -320,7 +347,8 @@ papaframe/
 
 State files written at runtime live under `/tmp/` (slideshow flags, the
 filtered live list, the slideshow state JSON) and next to `server.py`
-(`frame_display.log`, the year/location index caches).
+(`frame_display.log`, the year/location index caches, and the `cache/`
+folder holding cached photos + `manifest.tsv`).
 
 ---
 

@@ -194,6 +194,14 @@ If the slideshow shows "Loading FAILED" for every photo, your share isn't
 mounted — `systemctl status mnt-photos.automount mnt-photos.mount` will
 tell you why.
 
+**Tip — the photo cache makes a NAS setup far more robust.** PapaFrame can
+keep a local copy of upcoming photos (resized to the display) in `CACHE_DIR`,
+filled overnight. The slideshow shows cached copies transparently, so it
+keeps running even while the NAS is rebooting or briefly unreachable. It's on
+by default (`CACHE_SIZE_MB=2048`); tune size and compression in
+[config.sh](config.sh) or on the `/admin` page. See the README's
+"Photo cache" section for details.
+
 ---
 
 ## 8. Verifying things work

@@ -365,7 +365,8 @@ button:disabled { opacity: .35; cursor: not-allowed; }
 }
 
 /* ── Schedule controls ───────────────────────────────────────────────── */
-.schedule-content {
+.schedule-content,
+.cache-content {
   display: flex;
   flex-direction: column;
   gap: 12px;
