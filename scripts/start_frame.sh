@@ -193,13 +193,27 @@ atomic_shuffle() {
 # ── Drop paths from LIVE_LIST that no longer exist ───────────────────────────
 # fbi has no option to silence "Loading FAILED" — it renders that text to the
 # framebuffer whenever it can't open a file. Keeping missing paths out of the
-# filelist is the only way to hide it. Parallel stat over SMB runs in ~2 min
-# for ~500k paths, so we only run this in the background reshuffle loop, not
-# inline in atomic_shuffle where it would delay startup.
+# filelist is the only way to hide it. The sweep runs ~10 min for ~360k paths
+# at -P 4, so we only run it in the background reshuffle loop, not inline in
+# atomic_shuffle where it would delay startup.
 filter_missing() {
     local tmp="${LIVE_LIST}.filtered"
-    xargs -d '\n' -P 32 -n 200 -a "$LIVE_LIST" \
+    # -P 4 (not 32): each worker does a blocking stat() over the SMB mount, and
+    # a stat() against a slow or stalled share parks the process in
+    # uninterruptible D state. 32 of those at once drives the load average past
+    # 30 and starves the network stack — the Pi then looks like it dropped its
+    # WiFi connection. 4 keeps the blast radius small. timeout caps a stalled
+    # sweep instead of letting it grind for hours.
+    timeout 1200 xargs -d '\n' -P 4 -n 200 -a "$LIVE_LIST" \
         sh -c 'for p; do [ -f "$p" ] && printf "%s\n" "$p"; done' _ > "$tmp" 2>/dev/null
+    local rc=$?
+    # timeout exits 124 when it had to kill the sweep: $tmp is then a partial
+    # list, and applying it would silently drop still-valid photos. Discard it.
+    if [ "$rc" -eq 124 ]; then
+        echo "filter_missing: SMB sweep timed out — keeping existing list"
+        rm -f "$tmp"
+        return
+    fi
     # Only replace if the filter produced a non-empty result — an empty output
     # means the mount is down, and we'd rather keep the stale list than wipe it.
     if [ -s "$tmp" ]; then
