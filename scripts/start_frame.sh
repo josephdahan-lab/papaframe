@@ -64,8 +64,15 @@ DURATION="${DURATION:-$DEFAULT_DURATION}"
 
 # DRM device for fbi: "auto" picks the card with a connected HDMI; explicit
 # /dev/dri/cardN values are passed through; empty means "let fbi choose".
+# When auto, detection is re-run before every fbi launch (see the loop below):
+# the HDMI display card can be enumerated late — seconds to minutes after this
+# script starts — and a one-shot detection at startup would otherwise pin fbi
+# to the wrong card (or none) for the whole session.
 if [ -z "${FBI_DEVICE+x}" ] || [ "$FBI_DEVICE" = "auto" ]; then
+    FBI_DEVICE_AUTO=1
     FBI_DEVICE="$(detect_drm_device || true)"
+else
+    FBI_DEVICE_AUTO=0
 fi
 
 # ── Environment detection and viewer selection ────────────────────────────────
@@ -332,12 +339,22 @@ while true; do
         "$VIEWER_START" "$CUR_DURATION" "$LIVE_LIST" "$SELECTED_VIEWER" \
         > /tmp/frame_slideshow_state.json
 
+    # Re-detect the DRM card on every launch when FBI_DEVICE is "auto". The
+    # HDMI display card can appear after this script started; without -device
+    # fbi falls back to card0 (the V3D render node — no dumb buffers) and exits
+    # immediately, producing a ~5 s crash loop. Re-detecting here lets the
+    # slideshow self-heal within one cycle once the right card shows up.
+    if [ "$FBI_DEVICE_AUTO" = "1" ]; then
+        FBI_DEVICE="$(detect_drm_device || true)"
+    fi
+
     # Launch appropriate viewer based on environment
     case "$SELECTED_VIEWER" in
         fbi)
             # Framebuffer image viewer - runs on Linux virtual terminal without X.
-            # FBI_DEVICE is auto-detected (or set in config.sh) — empty means
-            # "let fbi pick the default card", which is right on single-card Pis.
+            # FBI_DEVICE is auto-detected each cycle (or pinned in config.sh).
+            # Empty means "let fbi pick the default card" — correct only on
+            # single-card Pis; multi-card Pis (4/5) must name the HDMI card.
             fbi ${FBI_DEVICE:+-device "$FBI_DEVICE"} \
                 -a -noverbose -readahead \
                 -t "$CUR_DURATION" \
