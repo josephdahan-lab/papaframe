@@ -503,6 +503,13 @@ def build_location_index(force=False):
             state['location_ready'] = True
             return
 
+        # Run at low priority — this is a long background scan and must never
+        # crowd out the slideshow or the web server.
+        try:
+            os.nice(15)
+        except Exception:
+            pass
+
         photos = get_photos()
         cache = {} if force else _load_location_cache()
 
@@ -542,8 +549,31 @@ def build_location_index(force=False):
         chunk_coords = []
         chunk_paths  = []
         seen_since_flush = 0
+        slow_streak = 0
         for p in to_scan:
+            # Pace EXIF reads to the health of the SMB share. _get_photo_gps
+            # opens each photo over CIFS-over-WiFi; firing reads at a struggling
+            # share flat-out wedges the kernel's CIFS workers in uninterruptible
+            # D-state and can lock the Pi up hard. Sleeping at least as long as
+            # a slow read took holds our request rate below what the share can
+            # absorb, so the CIFS workqueue keeps draining.
+            t0 = time.monotonic()
             gps = _get_photo_gps(p)
+            elapsed = time.monotonic() - t0
+            if elapsed > 0.5:
+                slow_streak += 1
+                time.sleep(min(elapsed, 5.0))
+                if slow_streak >= 20:
+                    # Share is clearly unhealthy — stand down so the CIFS
+                    # workqueue can drain before we pile on more load.
+                    logger.warning('Location index: SMB share slow — '
+                                    'backing off 60s')
+                    time.sleep(60)
+                    slow_streak = 0
+            else:
+                slow_streak = 0
+                time.sleep(0.02)  # gentle baseline pacing when the share is fast
+
             if gps is None:
                 cache[p] = NO_LOC
             else:
