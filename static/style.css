@@ -518,6 +518,19 @@ html.dark .schedule-paused-banner {
 .photo-meta-row a { color: var(--accent); text-decoration: none; }
 .photo-meta-row a:hover { text-decoration: underline; }
 
+.src-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: .68rem;
+  font-weight: 600;
+  letter-spacing: .02em;
+  line-height: 1.4;
+}
+.src-cache   { background: rgba( 52, 211, 153, .18); color: #34d399; }
+.src-network { background: rgba(251, 146,  60, .18); color: #fb923c; }
+.src-local   { background: rgba( 96, 165, 250, .18); color: #60a5fa; }
+
 /* photo progress */
 .photo-progress {
   display: flex;

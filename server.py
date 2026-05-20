@@ -750,6 +750,113 @@ def _cache_settings():
 def _cache_manifest_path(cdir):
     return cdir / 'manifest.tsv'
 
+# Filesystem types that indicate the path is on a network drive. autofs is
+# included because it almost always fronts a remote mount on this Pi (the
+# /mnt/plex CIFS share is set up exactly that way), and detection must work
+# even when the share hasn't been triggered yet.
+NETWORK_FSTYPES = frozenset({
+    'cifs', 'smb', 'smb2', 'smb3', 'smbfs',
+    'nfs', 'nfs4', 'nfsv4',
+    'fuse.sshfs', 'fuse.rclone', 'fuse.davfs',
+    'fuse.gcsfuse', 'fuse.s3fs', 'fuse.gvfs',
+    '9p', 'afs', 'ceph', 'glusterfs', 'ocfs2', 'gfs', 'gfs2',
+    'autofs',
+})
+
+def _mount_fstype(path):
+    """Return the fs type of the deepest mountpoint that contains `path`,
+    or None if the path is not mounted (shouldn't happen — at least '/' wins).
+    Reads /proc/mounts each call so changes (e.g. an autofs trigger) are
+    picked up without a server restart."""
+    try:
+        target = str(Path(path).resolve())
+    except OSError:
+        target = str(path)
+    best_mp, best_fs = '', None
+    try:
+        with open('/proc/mounts', 'r') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mp, fs = parts[1], parts[2]
+                if target == mp or target.startswith(mp.rstrip('/') + '/'):
+                    # Tie-break by length, then by source order (later entries
+                    # win — autofs stub appears before the real cifs overlay).
+                    if len(mp) >= len(best_mp):
+                        best_mp, best_fs = mp, fs
+    except OSError:
+        pass
+    return best_fs
+
+def _path_is_network(path):
+    fs = _mount_fstype(path)
+    return fs is not None and fs in NETWORK_FSTYPES
+
+def _photo_dirs_are_local():
+    """True iff every configured PHOTO_DIR sits on a local filesystem.
+    When this is True the cache is functionally pointless: photos already
+    load straight from local disk, so we skip fills and tag photos as
+    'local' in the UI instead of 'cache'/'network'."""
+    if not PHOTOS_DIRS:
+        return True
+    return not any(_path_is_network(p) for p in PHOTOS_DIRS)
+
+# Cached total-photo count, keyed by SOURCE_FILE's mtime. The cache status
+# poll uses this every 5 s, and the master list can be ~30 MB — a fresh read
+# each tick would chew through I/O for no benefit.
+_total_photos_state = {'mtime': 0.0, 'count': 0}
+
+def _total_photo_count():
+    try:
+        mt = SOURCE_FILE.stat().st_mtime
+    except OSError:
+        _total_photos_state['mtime'] = 0.0
+        _total_photos_state['count'] = 0
+        return 0
+    if mt == _total_photos_state['mtime']:
+        return _total_photos_state['count']
+    n = 0
+    try:
+        with SOURCE_FILE.open('rb') as f:
+            for line in f:
+                if line.strip():
+                    n += 1
+    except OSError:
+        pass
+    _total_photos_state['mtime'] = mt
+    _total_photos_state['count'] = n
+    return n
+
+# Parsed manifest cache (path → cache_path), keyed by manifest mtime so the
+# /api/currentphoto poll doesn't reparse the 1.7 MB file every few seconds.
+_manifest_state = {'mtime': 0.0, 'paths': set()}
+
+def _load_cache_manifest_paths(cdir):
+    """Return the set of *original* photo paths that have a cache entry.
+    Refreshed only when the manifest's mtime changes."""
+    mf = _cache_manifest_path(cdir)
+    try:
+        mt = mf.stat().st_mtime
+    except OSError:
+        _manifest_state['mtime'] = 0.0
+        _manifest_state['paths'] = set()
+        return _manifest_state['paths']
+    if mt == _manifest_state['mtime']:
+        return _manifest_state['paths']
+    paths = set()
+    try:
+        with mf.open('r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                src, _, dst = line.rstrip('\n').partition('\t')
+                if src and dst:
+                    paths.add(src)
+    except OSError:
+        pass
+    _manifest_state['mtime'] = mt
+    _manifest_state['paths'] = paths
+    return paths
+
 def _cache_key(src, mtime, compress, quality):
     """Deterministic cache filename for a photo + settings. The settings are
     folded into the hash, so toggling compression invalidates old entries."""
@@ -833,6 +940,12 @@ def _fill_cache(force=False):
     never competes with the running slideshow for CPU."""
     s = _cache_settings()
     if s['size_mb'] <= 0:
+        return
+    if _photo_dirs_are_local():
+        # Photos are already on local storage — caching them would only
+        # duplicate bytes for no latency win. Skip the pass entirely; the
+        # existing cache (if any) is left untouched in case PHOTO_DIRS
+        # later switches back to a network share.
         return
     cdir = s['dir']
     try:
@@ -1013,17 +1126,54 @@ def api_cache_status():
     """Report cache configuration and current usage for the dashboard."""
     s = _cache_settings()
     used_bytes, count = _cache_usage(s['dir'])
+    manifest_paths = _load_cache_manifest_paths(s['dir'])
+    total_photos = _total_photo_count()
+    local = _photo_dirs_are_local()
+    photo_dirs_info = [{
+        'path': str(p),
+        'fstype': _mount_fstype(p),
+        'is_network': _path_is_network(p),
+    } for p in PHOTOS_DIRS]
+    coverage = (len(manifest_paths) / total_photos * 100.0) if total_photos else 0.0
+
+    # Disk-space view at the cache dir. The "max safe budget" is what the user
+    # can spend on the cache without filling the filesystem: free space PLUS
+    # what the cache is already holding (those bytes can be re-spent), less a
+    # safety margin so the rootfs never runs dry.
+    try:
+        s['dir'].mkdir(parents=True, exist_ok=True)
+        du = shutil.disk_usage(s['dir'])
+        disk_total = du.total
+        disk_free  = du.free
+        disk_used  = du.used
+    except OSError:
+        disk_total = disk_free = disk_used = 0
+    MB = 1024 * 1024
+    safety_margin_mb = max(512, (disk_total // MB) // 20)  # 512 MB or 5%
+    max_budget_mb = max(0, (disk_free + used_bytes) // MB - safety_margin_mb)
+
     return jsonify({
-        'enabled':   s['size_mb'] > 0,
-        'size_mb':   s['size_mb'],
-        'used_mb':   round(used_bytes / (1024 * 1024), 1),
-        'count':     count,
-        'compress':  s['compress'],
-        'quality':   s['quality'],
-        'dir':       str(s['dir']),
-        'filling':   bool(state['cache'].get('filling')),
-        'last_fill': state['cache'].get('last_fill'),
-        'last_built': state['cache'].get('last_built', 0),
+        'enabled':            s['size_mb'] > 0,
+        'effective_enabled':  s['size_mb'] > 0 and not local,
+        'photo_dirs_local':   local,
+        'photo_dirs':         photo_dirs_info,
+        'size_mb':            s['size_mb'],
+        'used_mb':            round(used_bytes / MB, 1),
+        'count':              count,
+        'manifest_count':     len(manifest_paths),
+        'total_photos':       total_photos,
+        'coverage_pct':       round(coverage, 1),
+        'compress':           s['compress'],
+        'quality':            s['quality'],
+        'dir':                str(s['dir']),
+        'filling':            bool(state['cache'].get('filling')),
+        'last_fill':          state['cache'].get('last_fill'),
+        'last_built':         state['cache'].get('last_built', 0),
+        'disk_total_mb':      disk_total // MB,
+        'disk_free_mb':       disk_free // MB,
+        'disk_used_mb':       disk_used // MB,
+        'safety_margin_mb':   safety_margin_mb,
+        'max_budget_mb':      max_budget_mb,
     })
 
 @app.route('/api/cache/fill', methods=['POST'])
@@ -1033,6 +1183,9 @@ def api_cache_fill():
     s = _cache_settings()
     if s['size_mb'] <= 0:
         return jsonify({'error': 'cache is disabled (CACHE_SIZE_MB=0)'}), 400
+    if _photo_dirs_are_local():
+        return jsonify({'error':
+            'photos are on local storage — the cache is not needed'}), 400
     if state['cache'].get('filling'):
         return jsonify({'error': 'a cache fill is already running'}), 409
     threading.Thread(target=lambda: _fill_cache(force=True),
@@ -1235,6 +1388,18 @@ def api_currentphoto():
     else:
         idx = 0
 
+    # Resolve each photo's source: 'local' if PHOTO_DIRS are on local disk
+    # (cache is irrelevant), 'cache' if the manifest has a substitution for
+    # it, otherwise 'network'.
+    local_mode = _photo_dirs_are_local()
+    manifest_paths = set() if local_mode else _load_cache_manifest_paths(
+        _cache_settings()['dir'])
+
+    def photo_source(path):
+        if local_mode:
+            return 'local'
+        return 'cache' if path in manifest_paths else 'network'
+
     def photo_details(path):
         try:
             with Image.open(path) as img:
@@ -1245,10 +1410,11 @@ def api_currentphoto():
                     **get_photo_exif(path),
                     'size_bytes': Path(path).stat().st_size,
                     'dimensions': {'w': img.width, 'h': img.height},
+                    'source': photo_source(path),
                 }
         except Exception as e:
             logger.error(f'Error reading photo {path}: {e}')
-            return {'path': path, 'error': str(e)}
+            return {'path': path, 'error': str(e), 'source': photo_source(path)}
 
     prev_idx = (idx - 1) % total
     next_idx = (idx + 1) % total

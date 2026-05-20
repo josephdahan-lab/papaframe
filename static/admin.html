@@ -55,6 +55,22 @@
       display: inline-flex; align-items: center; gap: .35rem;
       font-size: .9rem; text-decoration: none; margin-bottom: 1rem;
     }
+    .cache-slider-row {
+      display: flex; align-items: center; gap: .6rem;
+    }
+    .cache-slider-row input[type=range] {
+      flex: 1; accent-color: var(--accent, #2563eb);
+    }
+    .cache-slider-row input[type=number].cache-slider-num {
+      width: 7em; flex: 0 0 auto;
+    }
+    .cache-slider-unit { font-size: .85rem; opacity: .7; }
+    .cache-slider-meta {
+      font-size: .82rem; opacity: .8; margin-top: .35rem;
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .cache-slider-meta .warn { color: #b45309; font-weight: 600; }
+    html.dark .cache-slider-meta .warn { color: #fbbf24; }
   </style>
 </head>
 <body>
@@ -143,9 +159,86 @@ async function loadConfig() {
     const data = await res.json();
     pathEl.textContent = data.path;
     fieldsEl.innerHTML = data.fields.map(renderField).join('');
+    enhanceCacheSizeField();
   } catch (e) {
     showBanner('Failed to load config: ' + e.message, 'error');
   }
+}
+
+function fmtMb(mb) {
+  if (mb >= 1024) return (mb / 1024).toFixed(mb >= 10240 ? 0 : 1) + ' GB';
+  return mb + ' MB';
+}
+
+// Replace the plain CACHE_SIZE_MB number input with a slider bound to the
+// disk space available at the cache directory. The form still submits via
+// the same `name="CACHE_SIZE_MB"` field, so saveConfig() picks it up as-is.
+async function enhanceCacheSizeField() {
+  const numInput = document.getElementById('f-CACHE_SIZE_MB');
+  if (!numInput) return;
+
+  let info;
+  try {
+    info = await fetch('/api/cache/status').then(r => r.json());
+  } catch (e) {
+    return;  // leave the plain number input in place
+  }
+
+  const currentVal = parseInt(numInput.value, 10) || 0;
+  const STEP = 128;
+  // Slider tops out at the safe max, but never below what's currently saved
+  // (so an out-of-range value loaded from config.sh remains visible/editable).
+  const niceMax = Math.max(
+    STEP,
+    Math.ceil(Math.max(info.max_budget_mb || 0, currentVal) / STEP) * STEP,
+  );
+  const usedNow = Math.round(info.used_mb || 0);
+
+  const tpl = document.createElement('template');
+  tpl.innerHTML = `
+    <div class="cache-slider-row">
+      <input type="range" id="cache-slider"
+             min="0" max="${niceMax}" step="${STEP}"
+             value="${Math.min(currentVal, niceMax)}">
+      <input id="f-CACHE_SIZE_MB" name="CACHE_SIZE_MB" type="number"
+             class="cache-slider-num"
+             min="0" step="${STEP}"
+             value="${currentVal}">
+      <span class="cache-slider-unit">MB</span>
+    </div>
+    <div class="cache-slider-meta" id="cache-slider-meta"></div>
+  `;
+  numInput.replaceWith(tpl.content);
+
+  const slider = document.getElementById('cache-slider');
+  const num    = document.getElementById('f-CACHE_SIZE_MB');
+  const meta   = document.getElementById('cache-slider-meta');
+
+  function renderMeta() {
+    const v = parseInt(num.value, 10) || 0;
+    const lines = [
+      `Disk: ${fmtMb(info.disk_total_mb)} total · ${fmtMb(info.disk_free_mb)} free`
+      + ` · cache currently uses ${fmtMb(usedNow)}`,
+      `Max safe budget: ${fmtMb(info.max_budget_mb)}`
+      + ` (keeps ${fmtMb(info.safety_margin_mb)} reserved on disk)`,
+      `Selected: ${fmtMb(v)}`,
+    ];
+    if (v > info.max_budget_mb) {
+      lines.push(`<span class="warn">⚠ Selected size exceeds the safe limit — disk may fill up.</span>`);
+    } else if (v === 0) {
+      lines.push(`<span>Set to 0 to disable the cache entirely.</span>`);
+    }
+    meta.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+  }
+
+  slider.addEventListener('input', () => { num.value = slider.value; renderMeta(); });
+  num.addEventListener('input', () => {
+    const raw = parseInt(num.value, 10);
+    const v = Number.isFinite(raw) ? Math.max(0, raw) : 0;
+    slider.value = Math.min(v, niceMax);
+    renderMeta();
+  });
+  renderMeta();
 }
 
 async function saveConfig(ev) {

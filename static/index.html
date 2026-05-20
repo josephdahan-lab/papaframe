@@ -184,10 +184,12 @@
         <div class="section-title">Photo Cache</div>
         <div class="cache-content">
           <div class="disk-rows">
-            <div class="disk-kv"><span class="key">Status</span> <span class="value" id="cache-state">—</span></div>
-            <div class="disk-kv"><span class="key">Photos</span> <span class="value" id="cache-count">—</span></div>
-            <div class="disk-kv"><span class="key">Used</span>   <span class="value" id="cache-used">—</span></div>
-            <div class="disk-kv"><span class="key">Mode</span>   <span class="value" id="cache-mode">—</span></div>
+            <div class="disk-kv"><span class="key">Status</span>   <span class="value" id="cache-state">—</span></div>
+            <div class="disk-kv"><span class="key">Photos</span>   <span class="value" id="cache-count">—</span></div>
+            <div class="disk-kv"><span class="key">Coverage</span> <span class="value" id="cache-coverage">—</span></div>
+            <div class="disk-kv"><span class="key">Used</span>     <span class="value" id="cache-used">—</span></div>
+            <div class="disk-kv"><span class="key">Mode</span>     <span class="value" id="cache-mode">—</span></div>
+            <div class="disk-kv"><span class="key">Source</span>   <span class="value" id="cache-source">—</span></div>
           </div>
           <div class="disk-bar-wrap">
             <div id="cache-bar" class="disk-bar" style="width:0%"></div>
@@ -1072,33 +1074,56 @@ async function fetchStats() {
 }
 
 // ── Photo cache ─────────────────────────────────────────────────────────
+function describePhotoSource(c) {
+  if (c.photo_dirs_local) return 'Local disk';
+  const fstypes = (c.photo_dirs || [])
+    .filter(d => d.is_network && d.fstype)
+    .map(d => d.fstype.toUpperCase());
+  const uniq = [...new Set(fstypes)];
+  return uniq.length ? `Network (${uniq.join(', ')})` : 'Network';
+}
+
 async function fetchCacheStatus() {
   try {
     const c = await fetch('/api/cache/status').then(r => r.json());
-    const stateEl = document.getElementById('cache-state');
-    const fillBtn = document.getElementById('cache-fill-btn');
-    const bar     = document.getElementById('cache-bar');
+    const stateEl    = document.getElementById('cache-state');
+    const fillBtn    = document.getElementById('cache-fill-btn');
+    const bar        = document.getElementById('cache-bar');
+    const countEl    = document.getElementById('cache-count');
+    const coverageEl = document.getElementById('cache-coverage');
+    const usedEl     = document.getElementById('cache-used');
+    const modeEl     = document.getElementById('cache-mode');
+    const sourceEl   = document.getElementById('cache-source');
+
+    sourceEl.textContent = describePhotoSource(c);
+
     if (!c.enabled) {
-      stateEl.textContent = 'Disabled';
-      document.getElementById('cache-count').textContent = '—';
-      document.getElementById('cache-used').textContent  = '—';
-      document.getElementById('cache-mode').textContent  = '—';
+      stateEl.textContent    = 'Disabled';
+      countEl.textContent    = '—';
+      coverageEl.textContent = '—';
+      usedEl.textContent     = '—';
+      modeEl.textContent     = '—';
       bar.style.width = '0%';
       if (fillBtn) fillBtn.disabled = true;
       return;
     }
-    stateEl.textContent = c.filling ? 'Filling…' : 'Ready';
-    document.getElementById('cache-count').textContent =
-      c.count.toLocaleString() + ' photos';
-    document.getElementById('cache-used').textContent =
-      `${c.used_mb.toFixed(0)} / ${c.size_mb} MB`;
-    document.getElementById('cache-mode').textContent =
-      c.compress ? `Compressed (q${c.quality})` : 'Full size';
+    if (c.photo_dirs_local) {
+      stateEl.textContent = 'Not needed (local photos)';
+      if (fillBtn) fillBtn.disabled = true;
+    } else {
+      stateEl.textContent = c.filling ? 'Filling…' : 'Ready';
+      if (fillBtn) fillBtn.disabled = !!c.filling;
+    }
+    countEl.textContent = c.count.toLocaleString() + ' photos';
+    coverageEl.textContent = c.total_photos
+      ? `${c.manifest_count.toLocaleString()} / ${c.total_photos.toLocaleString()} (${c.coverage_pct.toFixed(1)}%)`
+      : '—';
+    usedEl.textContent = `${c.used_mb.toFixed(0)} / ${c.size_mb} MB`;
+    modeEl.textContent = c.compress ? `Compressed (q${c.quality})` : 'Full size';
     const pct = c.size_mb > 0 ? Math.min(100, (c.used_mb / c.size_mb) * 100) : 0;
     bar.style.width = pct + '%';
-    bar.classList.toggle('warn', pct >= 75 && pct < 95);
+    bar.classList.toggle('warn',   pct >= 75 && pct < 95);
     bar.classList.toggle('danger', pct >= 95);
-    if (fillBtn) fillBtn.disabled = c.filling;
   } catch(e) { console.error('cache:', e); }
 }
 
@@ -1146,6 +1171,14 @@ function renderPhotoCard(metaEl, placeholderEl, cardEl, photo) {
   }
 
   const rows = [];
+  if (photo.source) {
+    const s = photo.source;
+    const label = s === 'cache' ? '💾 cache' : s === 'local' ? '📁 local' : '☁ network';
+    const title = s === 'cache' ? 'Served from local cache (no network read)'
+                : s === 'local' ? 'Photo lives on local storage'
+                                : 'Read from the network share';
+    rows.push(`<div class="photo-meta-row"><span class="src-badge src-${esc(s)}" title="${esc(title)}">${label}</span></div>`);
+  }
   if (photo.filename) rows.push(`<div class="photo-meta-name" title="${esc(photo.path)}">${esc(photo.filename)}</div>`);
   if (photo.album)    rows.push(`<div class="photo-meta-row">${esc(photo.album)}</div>`);
   if (photo.date_taken) {
