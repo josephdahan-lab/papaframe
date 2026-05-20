@@ -289,6 +289,38 @@ state = {
     },
 }
 
+# ── EXIF cache ───────────────────────────────────────────────────
+# Avoids re-opening images over the network on every 5-second poll.
+# Keyed by (path, mtime) so stale entries are never served.
+_EXIF_CACHE_MAX = 200
+_exif_cache = {}  # (path, mtime) -> {exif_data + dimensions}
+
+def _get_cached_exif(path):
+    """Return cached EXIF + dimensions dict, or fetch and cache it."""
+    try:
+        mt = int(Path(path).stat().st_mtime)
+    except OSError:
+        return {}
+    key = (path, mt)
+    if key in _exif_cache:
+        return _exif_cache[key]
+    result = get_photo_exif(path)
+    try:
+        with Image.open(path) as img:
+            result['dimensions'] = {'w': img.width, 'h': img.height}
+    except Exception:
+        result['dimensions'] = None
+    if len(_exif_cache) >= _EXIF_CACHE_MAX:
+        for old_key in list(_exif_cache)[:_EXIF_CACHE_MAX // 2]:
+            del _exif_cache[old_key]
+    _exif_cache[key] = result
+    return result
+
+# ── PID cache ────────────────────────────────────────────────────
+# Avoids scanning all processes every poll cycle.
+_pid_cache = {'viewer': None, 'viewer_ts': 0, 'script': None, 'script_ts': 0}
+_PID_CACHE_TTL = 10  # seconds
+
 # ── Control-file helpers ──────────────────────────────────────────
 def _read_file(path, default=''):
     """Read a small control file, returning default on any error."""
@@ -306,10 +338,7 @@ def _write_file(path, content):
 
 VIEWER_NAMES = ('fbi', 'feh', 'eog', 'display')
 
-def get_viewer_pid():
-    """Find the running image-viewer process (started by start_frame.sh).
-    start_frame.sh picks one of fbi/feh/eog/display based on the detected
-    environment, so we match any of them."""
+def _scan_viewer_pid():
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
             if proc.info['name'] in VIEWER_NAMES:
@@ -318,8 +347,19 @@ def get_viewer_pid():
             pass
     return None
 
-def get_frame_script_pid():
-    """Find the running start_frame.sh process."""
+def get_viewer_pid():
+    """Find the running image-viewer process, cached for _PID_CACHE_TTL seconds."""
+    now = time.time()
+    if now - _pid_cache['viewer_ts'] < _PID_CACHE_TTL:
+        pid = _pid_cache['viewer']
+        if pid is None or psutil.pid_exists(pid):
+            return pid
+    pid = _scan_viewer_pid()
+    _pid_cache['viewer'] = pid
+    _pid_cache['viewer_ts'] = now
+    return pid
+
+def _scan_frame_script_pid():
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
             cmdline = proc.info.get('cmdline') or []
@@ -328,6 +368,18 @@ def get_frame_script_pid():
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     return None
+
+def get_frame_script_pid():
+    """Find the running start_frame.sh process, cached for _PID_CACHE_TTL seconds."""
+    now = time.time()
+    if now - _pid_cache['script_ts'] < _PID_CACHE_TTL:
+        pid = _pid_cache['script']
+        if pid is None or psutil.pid_exists(pid):
+            return pid
+    pid = _scan_frame_script_pid()
+    _pid_cache['script'] = pid
+    _pid_cache['script_ts'] = now
+    return pid
 
 def is_running():
     """Check if the slideshow is currently running."""
@@ -1397,7 +1449,7 @@ def api_start():
         return jsonify({'error': 'Slideshow already running'}), 400
 
     data = request.json or {}
-    duration = data.get('duration', DEFAULT_DURATION)
+    duration = max(20, int(data.get('duration', DEFAULT_DURATION)))
 
     # Write duration before starting
     _write_file(DURATION_FILE, duration)
@@ -1474,7 +1526,7 @@ def api_setduration():
     """Change duration via control file. The bash script detects the change
     and kills/restarts fbi automatically."""
     data = request.json or {}
-    new_dur = data.get('duration', 5)
+    new_dur = max(20, int(data.get('duration', 20)))
     _write_file(DURATION_FILE, new_dur)
     logger.info(f'Duration set to {new_dur}s')
     return jsonify({'success': True})
@@ -1570,16 +1622,16 @@ def api_currentphoto():
 
     def photo_details(path):
         try:
-            with Image.open(path) as img:
-                return {
-                    'path': path,
-                    'filename': Path(path).name,
-                    'album': Path(path).parent.name,
-                    **get_photo_exif(path),
-                    'size_bytes': Path(path).stat().st_size,
-                    'dimensions': {'w': img.width, 'h': img.height},
-                    'source': photo_source(path),
-                }
+            cached = _get_cached_exif(path)
+            return {
+                'path': path,
+                'filename': Path(path).name,
+                'album': Path(path).parent.name,
+                **{k: v for k, v in cached.items() if k != 'dimensions'},
+                'size_bytes': Path(path).stat().st_size,
+                'dimensions': cached.get('dimensions'),
+                'source': photo_source(path),
+            }
         except Exception as e:
             logger.error(f'Error reading photo {path}: {e}')
             return {'path': path, 'error': str(e), 'source': photo_source(path)}
@@ -1818,6 +1870,7 @@ def api_stats():
 
 # ── API: Session GPS tracking ──────────────────────────────────────
 # Cache: maps photo path -> GPS point dict (or None). Cleared on session clear.
+_GPS_CACHE_MAX = 500
 _gps_cache = {}
 
 def _get_current_index():
@@ -1852,8 +1905,11 @@ def api_sessionpoints():
             if cached is not None:
                 points.append(cached)
             continue
-        # Read EXIF for GPS
-        exif = get_photo_exif(p)
+        # Read EXIF for GPS (use cached EXIF when available)
+        exif = _get_cached_exif(p) if p not in _gps_cache else get_photo_exif(p)
+        if len(_gps_cache) >= _GPS_CACHE_MAX:
+            for old_key in list(_gps_cache)[:_GPS_CACHE_MAX // 2]:
+                del _gps_cache[old_key]
         if 'gps' in exif:
             point = {
                 'lat': exif['gps']['lat'],
@@ -1893,17 +1949,11 @@ if __name__ == '__main__':
                 f'(low_resource={LOW_RESOURCE}, reason={LOW_RESOURCE_REASON or "n/a"})')
     logger.info('Building year index in background...')
     build_year_index()
-    # Location index: if a host-built shared cache lives on the share we can
-    # consume it cheaply on any board. Lite mode (Pi Zero) still skips the
-    # local EXIF scan — the whole reason for sharing the cache is to avoid
-    # exactly that — but it'll happily load whatever the share provides.
-    if ui_mode == 'lite':
-        logger.info('Lite UI mode: location index in load-only mode '
-                    '(no local EXIF scan; will pick up shared cache if present)')
-        build_location_index(allow_scan=False)
-    else:
-        logger.info('Building location index in background...')
-        build_location_index()
+    # Location index: the host (hpenvy) builds the location cache nightly via
+    # cron. This Pi only syncs and loads it — never does local EXIF scanning,
+    # which would hammer the CIFS share for hours and burn CPU.
+    logger.info('Building location index from shared cache (no local EXIF scan)...')
+    build_location_index(allow_scan=False)
     logger.info('Starting daily scheduler...')
     _start_scheduler()
     logger.info('Starting photo cache worker...')

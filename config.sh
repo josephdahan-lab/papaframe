@@ -34,7 +34,7 @@ PHOTO_DIRS="/mnt/plex/Pictures"
 
 # Cache budget in megabytes. The cache never grows past this; the
 # oldest entries are evicted first. Set to 0 to disable caching.
-CACHE_SIZE_MB=2048
+CACHE_SIZE_MB=12288
 
 # Compress cached photos. "yes" resizes each photo to fit 1920x1080
 # and re-encodes it as JPEG — far smaller, so the budget holds more
@@ -93,7 +93,7 @@ FORCE_VIEWER="auto"
 
 # Virtual terminal number for fbi (only used if fbi is selected).
 # "auto" picks the first writable VT (1-7). Set to a number (e.g. 1) to force.
-FBI_VT=""
+FBI_VT="auto"
 
 # DRM device for fbi. "auto" detects the card with a connected HDMI:
 #  - Pi Zero / Pi 3: single card → /dev/dri/card0

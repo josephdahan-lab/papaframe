@@ -122,17 +122,15 @@
         </div>
 
         <div class="duration-section">
-          <label for="duration">Photo duration (seconds)</label>
-          <div class="duration-row">
-            <input type="number" id="duration" class="duration-input" min="1" max="300" value="5">
-            <div class="preset-buttons">
-              <button class="preset-btn" data-duration="5">5s</button>
-              <button class="preset-btn" data-duration="10">10s</button>
-              <button class="preset-btn" data-duration="20">20s</button>
-              <button class="preset-btn" data-duration="30">30s</button>
-              <button class="preset-btn" data-duration="60">1m</button>
-            </div>
+          <label for="duration-dial">Photo duration</label>
+          <div style="display:flex; align-items:center; gap:12px; margin:8px 0;">
+            <input type="range" id="duration-dial" style="flex:1; accent-color:var(--primary,#4fc3f7);" min="20" max="120" step="5" value="30">
+            <span id="dial-value" style="font-size:1.1rem; font-weight:600; min-width:60px; text-align:center;">30s</span>
           </div>
+          <div style="display:flex; justify-content:space-between; font-size:.7rem; color:var(--text-muted,#888); padding:0 2px;">
+            <span>20s</span><span>40s</span><span>1m</span><span>1m20</span><span>1m40</span><span>2m</span>
+          </div>
+          <input type="hidden" id="duration" value="30">
           <button id="apply-duration" class="btn-apply" disabled>⚡ Apply Duration</button>
           <div class="duration-hint" id="duration-hint"></div>
         </div>
@@ -358,6 +356,8 @@ const stopBtn        = document.getElementById('stop');
 const restartBtn     = document.getElementById('restart');
 const applyDurBtn    = document.getElementById('apply-duration');
 const durationEl     = document.getElementById('duration');
+const dialEl         = document.getElementById('duration-dial');
+const dialValueEl    = document.getElementById('dial-value');
 const durHintEl      = document.getElementById('duration-hint');
 const themeToggle    = document.getElementById('theme-toggle');
 const toastCont      = document.getElementById('toast-container');
@@ -434,22 +434,26 @@ function esc(s) {
 let lastConfirmedDuration = null;
 let currentlyRunning = false;
 
-function updateDurationUI() {
-  const d = parseInt(durationEl.value, 10) || 5;
-  updateFacts();
+function fmtDial(s) { return s >= 60 ? Math.floor(s/60) + 'm' + (s%60 ? s%60 + 's' : '') : s + 's'; }
 
-  // Highlight matching preset button
-  document.querySelectorAll('.preset-btn').forEach(b => {
-    b.classList.toggle('active', parseInt(b.dataset.duration) === d);
-  });
+function syncDial() {
+  const d = parseInt(dialEl.value, 10);
+  durationEl.value = d;
+  dialValueEl.textContent = fmtDial(d);
+}
+
+function updateDurationUI() {
+  syncDial();
+  const d = parseInt(durationEl.value, 10) || 20;
+  updateFacts();
 
   if (currentlyRunning) {
     if (lastConfirmedDuration !== null && d !== lastConfirmedDuration) {
-      durHintEl.textContent = `Running at ${lastConfirmedDuration}s — click Apply to change`;
+      durHintEl.textContent = `Running at ${fmtDial(lastConfirmedDuration)} — click Apply to change`;
       durHintEl.classList.add('changed');
       applyDurBtn.disabled = false;
     } else {
-      durHintEl.textContent = lastConfirmedDuration ? `Currently running at ${lastConfirmedDuration}s` : '';
+      durHintEl.textContent = lastConfirmedDuration ? `Currently at ${fmtDial(lastConfirmedDuration)}` : '';
       durHintEl.classList.remove('changed');
       applyDurBtn.disabled = true;
     }
@@ -460,13 +464,7 @@ function updateDurationUI() {
   }
 }
 
-durationEl.addEventListener('input', updateDurationUI);
-durationEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !applyDurBtn.disabled) doApplyDuration();
-});
-document.querySelectorAll('.preset-btn').forEach(b =>
-  b.addEventListener('click', () => { durationEl.value = b.dataset.duration; updateDurationUI(); })
-);
+dialEl.addEventListener('input', updateDurationUI);
 
 // ── Status handling ─────────────────────────────────────────────────────
 function applyStatus(body) {
@@ -504,7 +502,13 @@ function applyStatus(body) {
 
   if (body.duration) {
     lastConfirmedDuration = body.duration;
-    runningDurEl.textContent = `${body.duration}s / photo`;
+    runningDurEl.textContent = fmtDial(body.duration) + ' / photo';
+    if (document.activeElement !== dialEl) {
+      const clamped = Math.max(20, Math.min(120, body.duration));
+      dialEl.value = clamped;
+      durationEl.value = clamped;
+      dialValueEl.textContent = fmtDial(clamped);
+    }
   } else if (!running) {
     lastConfirmedDuration = null;
     runningDurEl.textContent = '—';
@@ -1408,17 +1412,17 @@ window.addEventListener('load', () => {
   const cacheFillBtn = document.getElementById('cache-fill-btn');
   if (cacheFillBtn) cacheFillBtn.addEventListener('click', fillCacheNow);
 
-  setInterval(fetchStatus,        3000);
-  setInterval(fetchStats,         5000);
+  setInterval(fetchStatus,       15000);
+  setInterval(fetchStats,        30000);
   setInterval(fetchPhotoInfo,    60000);
-  setInterval(fetchSessionPoints, 8000);
-  setInterval(fetchCacheStatus,   5000);
+  setInterval(fetchSessionPoints,15000);
+  setInterval(fetchCacheStatus,  30000);
 
   // Poll current photo at the slide duration rate (re-schedule when duration changes)
   let photoInterval = null;
   function schedulePhotoPoll() {
     if (photoInterval) clearInterval(photoInterval);
-    const dur = (lastConfirmedDuration || parseInt(durationEl.value, 10) || 5) * 1000;
+    const dur = (lastConfirmedDuration || parseInt(durationEl.value, 10) || 20) * 1000;
     photoInterval = setInterval(fetchCurrentPhoto, dur);
   }
   schedulePhotoPoll();

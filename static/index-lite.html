@@ -114,11 +114,15 @@
   }
   .year-btn:hover { border-color: var(--accent); }
   .year-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .duration-presets { display: flex; gap: 4px; flex-wrap: wrap; }
-  .duration-presets .preset {
-    font-size: .8rem; padding: 4px 8px; border-radius: 6px;
-  }
-  .duration-presets .preset.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .dial-wrap { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+  .dial-label { font-size: 1.1rem; font-weight: 600; min-width: 60px; text-align: center; }
+  .dial-range { -webkit-appearance: none; appearance: none; width: 100%; height: 8px;
+    border-radius: 4px; background: var(--border); outline: none; }
+  .dial-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none;
+    width: 24px; height: 24px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+  .dial-range::-moz-range-thumb { width: 24px; height: 24px; border-radius: 50%;
+    background: var(--accent); cursor: pointer; border: none; }
+  .dial-ticks { display: flex; justify-content: space-between; font-size: .7rem; color: var(--muted); padding: 0 2px; }
   .hint { font-size: .78rem; color: var(--muted); margin-top: 4px; }
   .footer {
     text-align: center; font-size: .75rem; color: var(--muted);
@@ -172,18 +176,13 @@
 
   <div class="card">
     <h2>Photo Duration</h2>
-    <div style="display:flex; align-items:center; gap:8px; flex-wrap: wrap;">
-      <input type="number" id="duration" min="1" max="600" value="5">
-      <span>seconds</span>
+    <div class="dial-wrap">
+      <input type="range" id="duration-dial" class="dial-range" min="20" max="120" step="5" value="30">
+      <span class="dial-label" id="dial-value">30s</span>
       <button id="btn-apply-dur" class="primary" disabled>Apply</button>
     </div>
-    <div class="duration-presets" style="margin-top:8px">
-      <button class="preset" data-d="5">5s</button>
-      <button class="preset" data-d="10">10s</button>
-      <button class="preset" data-d="20">20s</button>
-      <button class="preset" data-d="30">30s</button>
-      <button class="preset" data-d="60">1m</button>
-    </div>
+    <div class="dial-ticks"><span>20s</span><span>40s</span><span>1m</span><span>1m20</span><span>1m40</span><span>2m</span></div>
+    <input type="hidden" id="duration" value="30">
     <div class="hint" id="duration-hint"></div>
   </div>
 
@@ -316,20 +315,26 @@ $('theme-toggle').addEventListener('click', () => {
   localStorage.setItem(THEME_KEY, next ? 'dark' : 'light');
 });
 
-// ── Duration logic ───────────────────────────────────────────────────
+// ── Duration dial logic ──────────────────────────────────────────────
 let lastConfirmedDur = null, currentlyRunning = false;
+const dial = $('duration-dial');
+function fmtDial(s) { return s >= 60 ? Math.floor(s/60) + 'm' + (s%60 ? s%60 + 's' : '') : s + 's'; }
+function syncDial() {
+  const d = parseInt(dial.value, 10);
+  $('duration').value = d;
+  $('dial-value').textContent = fmtDial(d);
+}
 function updateDurUI() {
-  const d = parseInt($('duration').value, 10) || 5;
-  document.querySelectorAll('.preset').forEach(b =>
-    b.classList.toggle('active', parseInt(b.dataset.d, 10) === d));
+  syncDial();
+  const d = parseInt($('duration').value, 10) || 20;
   const hint = $('duration-hint');
   const apply = $('btn-apply-dur');
   if (currentlyRunning) {
     if (lastConfirmedDur != null && d !== lastConfirmedDur) {
-      hint.textContent = `Running at ${lastConfirmedDur}s — click Apply to change`;
+      hint.textContent = `Running at ${fmtDial(lastConfirmedDur)} — click Apply to change`;
       apply.disabled = false;
     } else {
-      hint.textContent = lastConfirmedDur ? `Currently running at ${lastConfirmedDur}s` : '';
+      hint.textContent = lastConfirmedDur ? `Currently at ${fmtDial(lastConfirmedDur)}` : '';
       apply.disabled = true;
     }
   } else {
@@ -337,12 +342,10 @@ function updateDurUI() {
     apply.disabled = true;
   }
 }
-$('duration').addEventListener('input', updateDurUI);
-document.querySelectorAll('.preset').forEach(b =>
-  b.addEventListener('click', () => { $('duration').value = b.dataset.d; updateDurUI(); }));
+dial.addEventListener('input', updateDurUI);
 
 // ── Actions ─────────────────────────────────────────────────────────
-function getDur() { return parseInt($('duration').value, 10) || 5; }
+function getDur() { return Math.max(20, parseInt($('duration').value, 10) || 20); }
 
 $('btn-start').addEventListener('click', async () => {
   try { await postJSON('/api/start', { duration: getDur() }); showToast('Slideshow started'); }
@@ -427,11 +430,14 @@ async function refreshStatus() {
     $('status-pill').textContent = s.running ? 'Running' : 'Stopped';
     $('pid').textContent = s.pid || '—';
     if (s.running && s.duration) {
-      $('run-dur').textContent = s.duration + 's';
+      $('run-dur').textContent = fmtDial(s.duration);
       if (lastConfirmedDur !== s.duration) {
         lastConfirmedDur = s.duration;
-        if (!document.activeElement || document.activeElement.id !== 'duration') {
-          $('duration').value = s.duration;
+        if (document.activeElement !== dial) {
+          const clamped = Math.max(20, Math.min(120, s.duration));
+          dial.value = clamped;
+          $('duration').value = clamped;
+          $('dial-value').textContent = fmtDial(clamped);
         }
       }
     } else {
@@ -576,13 +582,13 @@ refreshCache();
 refreshSchedule();
 refreshYears();
 
-// Polling cadence — Pi Zero friendly. Most things change slowly.
-setInterval(refreshStatus,   5000);
-setInterval(refreshStats,   10000);
-setInterval(refreshPhoto,    5000);
+// Polling cadence — relaxed to reduce CPU load on Pi.
+setInterval(refreshStatus,  15000);
+setInterval(refreshStats,   30000);
+setInterval(refreshPhoto,   15000);
 setInterval(refreshLib,     60000);
-setInterval(refreshCache,   15000);
-setInterval(refreshSchedule,30000);
+setInterval(refreshCache,   30000);
+setInterval(refreshSchedule,60000);
 setInterval(refreshYears,   60000);
 </script>
 </body>
