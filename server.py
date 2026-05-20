@@ -89,6 +89,8 @@ CONFIG_SCHEMA = [
      'JPEG quality 1-100 for compressed cache entries (ignored if compression is off).'),
     ('CACHE_DIR',         'str', 'Cache folder',
      'Where cached photos are stored (relative paths resolve from the repo root).'),
+    ('LITE_UI',           'str', 'Lite web UI',
+     '"auto" picks lite on Pi Zero / low-RAM boards. "yes" forces lite; "no" forces full.'),
 ]
 
 def write_config(path, updates):
@@ -128,6 +130,43 @@ def _cfg_int(key, default):
         return default
 
 REPO_ROOT = Path(__file__).resolve().parent
+
+# ── Low-resource detection ─────────────────────────────────────────
+# Identifies hardware that struggles with the full dashboard (Leaflet, Chart.js,
+# constant PIL thumbnail re-encodes). Currently means Pi Zero / Pi Zero W /
+# Pi Zero 2 W, and any other board with ≲700 MB RAM. Computed once at import
+# time — re-running detection per request would be wasted I/O on /proc.
+def _detect_low_resource():
+    try:
+        model = Path('/proc/device-tree/model').read_text(errors='replace').strip('\x00 \n')
+    except OSError:
+        model = ''
+    if 'Zero' in model or 'Pi 1' in model:
+        return True, f'board model "{model}"'
+    if os.uname().machine == 'armv6l':
+        return True, 'armv6 CPU (Pi Zero / Pi 1)'
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    kb = int(line.split()[1])
+                    if kb <= 700 * 1024:
+                        return True, f'{kb // 1024} MB RAM'
+                    break
+    except OSError:
+        pass
+    return False, ''
+
+LOW_RESOURCE, LOW_RESOURCE_REASON = _detect_low_resource()
+
+def _resolve_ui_mode():
+    """'lite' or 'full', honoring LITE_UI=auto|yes|no from config.sh."""
+    raw = str(CONFIG.get('LITE_UI', 'auto')).strip().lower()
+    if raw in ('yes', 'true', '1', 'on', 'lite'):
+        return 'lite'
+    if raw in ('no', 'false', '0', 'off', 'full'):
+        return 'full'
+    return 'lite' if LOW_RESOURCE else 'full'
 
 def _cfg_path(key, default):
     """Read a path from config, expand ~/$VARS, and resolve relative paths
@@ -1055,11 +1094,38 @@ def _write_filtered_list(cc):
 # ── Serve static files ─────────────────────────────────────────────
 @app.route('/')
 def serve_index():
+    # Lite mode: skinny, dependency-free page for Pi Zero / low-RAM boards.
+    # The full page is still reachable at /full for manual checks.
+    if _resolve_ui_mode() == 'lite':
+        return send_from_directory('static', 'index-lite.html')
     return send_from_directory('static', 'index.html')
+
+@app.route('/full')
+def serve_index_full():
+    """Force the full dashboard even when lite is the default — handy for
+    opening the heavy UI from a phone/laptop while the Pi Zero is idle."""
+    return send_from_directory('static', 'index.html')
+
+@app.route('/lite')
+def serve_index_lite():
+    """Force the lite UI — useful when debugging on any board."""
+    return send_from_directory('static', 'index-lite.html')
 
 @app.route('/admin')
 def serve_admin():
     return send_from_directory('static', 'admin.html')
+
+@app.route('/api/uimode', methods=['GET'])
+def api_uimode():
+    """Tell the client which UI we're serving and why, plus the active
+    poll cadence so the lite UI can pace itself."""
+    mode = _resolve_ui_mode()
+    return jsonify({
+        'mode':           mode,
+        'low_resource':   LOW_RESOURCE,
+        'reason':         LOW_RESOURCE_REASON or 'default board',
+        'configured':     CONFIG.get('LITE_UI', 'auto'),
+    })
 
 # ── API: Config (admin page) ───────────────────────────────────────
 @app.route('/api/config', methods=['GET'])
@@ -1342,7 +1408,9 @@ def api_photoinfo():
 
 @app.route('/api/photo/thumb', methods=['GET'])
 def api_photo_thumb():
-    """Get photo thumbnail."""
+    """Get photo thumbnail. Cached to /tmp keyed by sha1(path+mtime) so the
+    same thumb is encoded at most once per source-file revision — repeated
+    polls from the dashboard become a static-file send."""
     path = request.args.get('path')
     if not path:
         return jsonify({'error': 'Invalid path'}), 400
@@ -1351,11 +1419,18 @@ def api_photo_thumb():
         return jsonify({'error': 'Invalid path'}), 400
 
     try:
-        with Image.open(path) as img:
-            img.thumbnail((200, 200))
-            img_path = f'/tmp/thumb_{hash(path)}.jpg'
-            img.save(img_path, 'JPEG')
-            return send_from_directory('/tmp', f'thumb_{hash(path)}.jpg')
+        mtime = int(resolved.stat().st_mtime)
+        digest = hashlib.sha1(f'{resolved}|{mtime}'.encode('utf-8', 'replace')).hexdigest()
+        name = f'thumb_{digest}.jpg'
+        cached = Path('/tmp') / name
+        if not cached.exists():
+            tmp = cached.with_name(cached.name + '.tmp')
+            with Image.open(path) as img:
+                img = ImageOps.exif_transpose(img)
+                img.thumbnail((200, 200), Image.LANCZOS)
+                img.convert('RGB').save(tmp, 'JPEG', quality=80, optimize=True)
+            tmp.replace(cached)
+        return send_from_directory('/tmp', name, max_age=300)
     except Exception as e:
         logger.error(f'Thumbnail error: {e}')
         return jsonify({'error': str(e)}), 400
@@ -1720,10 +1795,21 @@ def api_clearsession():
 
 # ── Entry point ────────────────────────────────────────────────────
 if __name__ == '__main__':
+    ui_mode = _resolve_ui_mode()
+    logger.info(f'UI mode: {ui_mode} '
+                f'(low_resource={LOW_RESOURCE}, reason={LOW_RESOURCE_REASON or "n/a"})')
     logger.info('Building year index in background...')
     build_year_index()
-    logger.info('Building location index in background...')
-    build_location_index()
+    # Location index does a per-photo EXIF read — even with aggressive pacing,
+    # on Pi Zero over CIFS this can lock up the kernel's CIFS workqueue.
+    # The lite UI omits the location filter, so on lite boards we skip the
+    # whole scan and save the CPU + RAM.
+    if ui_mode == 'lite':
+        logger.info('Lite UI mode: skipping location index (saves CPU + RAM)')
+        state['location_ready'] = True  # so /api/locations returns "no data" cleanly
+    else:
+        logger.info('Building location index in background...')
+        build_location_index()
     logger.info('Starting daily scheduler...')
     _start_scheduler()
     logger.info('Starting photo cache worker...')

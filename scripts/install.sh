@@ -74,6 +74,21 @@ else
     PLAN_DESC="prebuilt wheels available — straight pip install"
 fi
 
+# Web UI variant: lite on Pi Zero (low CPU + RAM), full elsewhere. The server
+# picks at runtime from LITE_UI=auto in config.sh, so the installer only
+# needs to surface the choice in the summary banner. Both pages are always
+# shipped — /lite and /full force the variant for testing.
+case "$PI_MODEL" in
+    *Zero*|*"Pi 1"*) UI_HINT="lite (Pi Zero / low-resource board)" ;;
+    *)
+        if [ "$ARCH" = "armv6l" ] || [ "$RAM_MB" -le 700 ]; then
+            UI_HINT="lite (auto: armv6 or ≤700 MB RAM)"
+        else
+            UI_HINT="full dashboard"
+        fi
+        ;;
+esac
+
 # Low-RAM boards need swap so a from-source Pillow build is not OOM-killed.
 if [ "$RAM_MB" -lt 1024 ]; then LOW_RAM=1; else LOW_RAM=0; fi
 
@@ -114,6 +129,7 @@ echo "    user:    $TARGET_USER  (home: $TARGET_HOME)"
 echo "    board:   $PI_MODEL"
 echo "    arch:    $ARCH, ${RAM_MB} MB RAM"
 echo "    display: $DISPLAY_HINT"
+echo "    web UI:  $UI_HINT"
 echo "    plan:    $PLAN_DESC"
 echo "═══════════════════════════════════════════════════"
 echo

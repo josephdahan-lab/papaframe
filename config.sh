@@ -49,6 +49,16 @@ CACHE_QUALITY=82
 # root, so the default lands at ~/papaframe/cache.
 CACHE_DIR="cache"
 
+# ── Web UI ────────────────────────────────────────────────────────
+# Which dashboard to serve at /. The full UI loads Leaflet + Chart.js and
+# polls aggressively, which is too heavy for a Pi Zero. The lite UI is a
+# single dependency-free page that keeps every control but drops the map,
+# CPU chart, and photo thumbnails.
+#   "auto" — lite on Pi Zero / low-RAM boards, full elsewhere (recommended)
+#   "yes"  — force the lite UI everywhere
+#   "no"   — force the full UI everywhere
+LITE_UI="auto"
+
 # ── Slideshow timing ──────────────────────────────────────────────
 # Default seconds per photo when the UI does not specify one.
 DEFAULT_DURATION=30
@@ -68,7 +78,7 @@ FORCE_VIEWER="auto"
 
 # Virtual terminal number for fbi (only used if fbi is selected).
 # "auto" picks the first writable VT (1-7). Set to a number (e.g. 1) to force.
-FBI_VT=auto
+FBI_VT=""
 
 # DRM device for fbi. "auto" detects the card with a connected HDMI:
 #  - Pi Zero / Pi 3: single card → /dev/dri/card0

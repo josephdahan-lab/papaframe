@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PapaFrame — Lite</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg:        #f7f8fb;
+    --card:      #ffffff;
+    --border:    #e2e8f0;
+    --text:      #0f172a;
+    --muted:     #64748b;
+    --accent:    #2563eb;
+    --good:      #16a34a;
+    --warn:      #b45309;
+    --bad:       #dc2626;
+  }
+  html.dark {
+    --bg:     #0b1220;
+    --card:   #111c2f;
+    --border: #1f2a44;
+    --text:   #f1f5f9;
+    --muted:  #94a3b8;
+    --accent: #60a5fa;
+    --good:   #22c55e;
+    --warn:   #fbbf24;
+    --bad:    #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 0 32px;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 12px; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; flex-wrap: wrap; padding: 8px 4px 14px;
+  }
+  header h1 { margin: 0; font-size: 1.35rem; font-weight: 700; }
+  header h1 span.thin { font-weight: 300; opacity: .85; }
+  header .hostname { font-size: .78rem; color: var(--muted); }
+  header .actions { display: flex; gap: 6px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+  .card h2 {
+    margin: 0 0 8px; font-size: .78rem;
+    text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); font-weight: 700;
+  }
+  .row { display: flex; justify-content: space-between; gap: 8px;
+         padding: 3px 0; font-size: .92rem; }
+  .row .k { color: var(--muted); }
+  .row .v { font-weight: 600; text-align: right; word-break: break-all; }
+  button, .btn {
+    appearance: none; border: 1px solid var(--border);
+    background: var(--card); color: var(--text);
+    padding: 7px 11px; border-radius: 8px;
+    font: inherit; cursor: pointer;
+    line-height: 1.2;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.danger  { background: var(--bad);    color: #fff; border-color: var(--bad); }
+  button.good    { background: var(--good);   color: #fff; border-color: var(--good); }
+  .btn-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  input[type=number], input[type=time] {
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+    padding: 6px 8px; border-radius: 7px; font: inherit; width: 90px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: .75rem; font-weight: 600;
+  }
+  .pill.running { background: rgba(34,197,94,.15); color: var(--good); }
+  .pill.stopped { background: rgba(248,113,113,.15); color: var(--bad); }
+  .pill.idle    { background: rgba(148,163,184,.18); color: var(--muted); }
+  .src {
+    display: inline-block; padding: 1px 6px; border-radius: 999px;
+    font-size: .7rem; font-weight: 600;
+  }
+  .src-cache   { background: rgba(34,197,94,.18);   color: var(--good); }
+  .src-network { background: rgba(251,146,60,.18);  color: var(--warn); }
+  .src-local   { background: rgba(96,165,250,.18);  color: var(--accent); }
+  .photo-block { padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .photo-block:last-child { border-bottom: 0; }
+  .photo-block .lbl {
+    font-size: .68rem; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); font-weight: 700; margin-bottom: 3px;
+  }
+  .photo-block .name { font-weight: 600; word-break: break-all; font-size: .9rem; }
+  .photo-block .meta { font-size: .78rem; color: var(--muted); }
+  .bar-wrap { background: var(--border); border-radius: 999px; height: 6px;
+              overflow: hidden; margin: 8px 0 2px; }
+  .bar { height: 100%; background: var(--accent); transition: width .3s ease; }
+  .bar.warn { background: var(--warn); }
+  .bar.danger { background: var(--bad); }
+  .year-grid { display: flex; flex-wrap: wrap; gap: 4px; }
+  .year-btn {
+    font-size: .78rem; padding: 4px 8px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+    cursor: pointer;
+  }
+  .year-btn:hover { border-color: var(--accent); }
+  .year-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .duration-presets { display: flex; gap: 4px; flex-wrap: wrap; }
+  .duration-presets .preset {
+    font-size: .8rem; padding: 4px 8px; border-radius: 6px;
+  }
+  .duration-presets .preset.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .hint { font-size: .78rem; color: var(--muted); margin-top: 4px; }
+  .footer {
+    text-align: center; font-size: .75rem; color: var(--muted);
+    margin-top: 16px;
+  }
+  .footer code { background: var(--border); padding: 1px 5px; border-radius: 4px; }
+  .toast {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+    background: var(--card); border: 1px solid var(--border);
+    padding: 8px 14px; border-radius: 8px; font-size: .85rem;
+    box-shadow: 0 6px 24px rgba(0,0,0,.18);
+    opacity: 0; pointer-events: none; transition: opacity .2s;
+    z-index: 100;
+  }
+  .toast.show { opacity: 1; }
+  .toast.error { color: var(--bad); border-color: var(--bad); }
+</style>
+</head>
+<body>
+<div id="toast" class="toast"></div>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1><span class="thin">Papa</span>Frame <span class="pill idle" id="lite-tag" style="font-size:.6rem">Lite</span></h1>
+      <div class="hostname" id="hostname">—</div>
+    </div>
+    <div class="actions">
+      <a class="btn" href="/admin">⚙ Admin</a>
+      <a class="btn" href="/full" title="Full dashboard (heavier)">Full UI</a>
+      <button class="btn" id="theme-toggle">🌙</button>
+    </div>
+  </header>
+
+  <div class="card">
+    <h2>Status</h2>
+    <div class="row"><span class="k">Slideshow</span>
+      <span class="v"><span id="status-pill" class="pill idle">Loading…</span></span></div>
+    <div class="row"><span class="k">PID</span>          <span class="v" id="pid">—</span></div>
+    <div class="row"><span class="k">Duration</span>     <span class="v" id="run-dur">—</span></div>
+    <div class="row"><span class="k">Server uptime</span><span class="v" id="uptime">—</span></div>
+    <div class="row"><span class="k">CPU</span>          <span class="v" id="cpu">—</span></div>
+    <div class="btn-row">
+      <button id="btn-start"   class="good">▶ Start</button>
+      <button id="btn-stop"    class="danger">■ Stop</button>
+      <button id="btn-restart">↻ Restart</button>
+      <button id="btn-screen-off">🌙 Screen off</button>
+      <button id="btn-screen-on">☀ Screen on</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Photo Duration</h2>
+    <div style="display:flex; align-items:center; gap:8px; flex-wrap: wrap;">
+      <input type="number" id="duration" min="1" max="600" value="5">
+      <span>seconds</span>
+      <button id="btn-apply-dur" class="primary" disabled>Apply</button>
+    </div>
+    <div class="duration-presets" style="margin-top:8px">
+      <button class="preset" data-d="5">5s</button>
+      <button class="preset" data-d="10">10s</button>
+      <button class="preset" data-d="20">20s</button>
+      <button class="preset" data-d="30">30s</button>
+      <button class="preset" data-d="60">1m</button>
+    </div>
+    <div class="hint" id="duration-hint"></div>
+  </div>
+
+  <div class="card">
+    <h2>Now Playing</h2>
+    <div id="photo-index" style="font-size:.8rem; color: var(--muted); margin-bottom: 4px">—</div>
+    <div class="bar-wrap"><div id="photo-bar" class="bar" style="width:0%"></div></div>
+    <div class="photo-block">
+      <div class="lbl">Now Showing</div>
+      <div class="name" id="curr-name">—</div>
+      <div class="meta" id="curr-meta"></div>
+    </div>
+    <div class="photo-block">
+      <div class="lbl">Previous</div>
+      <div class="name" id="prev-name">—</div>
+      <div class="meta" id="prev-meta"></div>
+    </div>
+    <div class="photo-block">
+      <div class="lbl">Up Next</div>
+      <div class="name" id="next-name">—</div>
+      <div class="meta" id="next-meta"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Library</h2>
+    <div class="row"><span class="k">Total photos</span> <span class="v" id="lib-count">—</span></div>
+    <div class="row"><span class="k">Years</span>        <span class="v" id="lib-years">—</span></div>
+    <div class="row"><span class="k">Formats</span>      <span class="v" id="lib-formats">—</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Photo Cache</h2>
+    <div class="row"><span class="k">Status</span>   <span class="v" id="cache-state">—</span></div>
+    <div class="row"><span class="k">Photos</span>   <span class="v" id="cache-count">—</span></div>
+    <div class="row"><span class="k">Coverage</span> <span class="v" id="cache-coverage">—</span></div>
+    <div class="row"><span class="k">Used</span>     <span class="v" id="cache-used">—</span></div>
+    <div class="row"><span class="k">Mode</span>     <span class="v" id="cache-mode">—</span></div>
+    <div class="row"><span class="k">Source</span>   <span class="v" id="cache-source">—</span></div>
+    <div class="bar-wrap"><div id="cache-bar" class="bar" style="width:0%"></div></div>
+    <div class="btn-row"><button id="btn-fill-cache" class="primary">⚡ Fill cache now</button></div>
+  </div>
+
+  <div class="card">
+    <h2>Daily Schedule</h2>
+    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none">
+      <input type="checkbox" id="schedule-toggle">
+      <span id="schedule-status">—</span>
+    </label>
+    <div style="display:flex; gap:10px; flex-wrap: wrap; margin-top: 8px">
+      <div>
+        <div class="hint" style="margin:0">Screen off at</div>
+        <input type="time" id="schedule-off" value="23:59">
+      </div>
+      <div>
+        <div class="hint" style="margin:0">Screen on at</div>
+        <input type="time" id="schedule-on" value="06:00">
+      </div>
+      <button id="btn-save-schedule" class="primary" style="align-self: flex-end">Save</button>
+    </div>
+  </div>
+
+  <div class="card" id="years-card">
+    <h2 style="display:flex; align-items:center; justify-content: space-between">
+      <span>Filter by Year</span>
+      <button id="btn-rebuild-years" style="font-size:.7rem; padding: 3px 7px">↺ Rebuild</button>
+    </h2>
+    <div class="year-grid" id="year-grid"><span class="hint">Loading…</span></div>
+  </div>
+
+  <div class="footer">
+    Lite UI · <code id="lite-reason">—</code> · <a href="/full">Switch to full dashboard</a>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+
+// ── Helpers ─────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                          .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+function fmtNum(n) { return Number(n).toLocaleString(); }
+function fmtMb(mb) {
+  if (mb >= 1024) return (mb / 1024).toFixed(mb >= 10240 ? 0 : 1) + ' GB';
+  return mb + ' MB';
+}
+function fmtUptime(s) {
+  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${s%60}s`;
+}
+function showToast(msg, isError) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.toggle('error', !!isError);
+  t.classList.add('show');
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => t.classList.remove('show'), 2500);
+}
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  let data = {};
+  try { data = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+
+// ── Theme ────────────────────────────────────────────────────────────
+const THEME_KEY = 'frameTheme';
+function applyTheme(dark) {
+  document.documentElement.classList.toggle('dark', dark);
+  $('theme-toggle').textContent = dark ? '☀' : '🌙';
+}
+(function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  const dark = saved ? saved === 'dark'
+                     : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  applyTheme(dark);
+})();
+$('theme-toggle').addEventListener('click', () => {
+  const next = !document.documentElement.classList.contains('dark');
+  applyTheme(next);
+  localStorage.setItem(THEME_KEY, next ? 'dark' : 'light');
+});
+
+// ── Duration logic ───────────────────────────────────────────────────
+let lastConfirmedDur = null, currentlyRunning = false;
+function updateDurUI() {
+  const d = parseInt($('duration').value, 10) || 5;
+  document.querySelectorAll('.preset').forEach(b =>
+    b.classList.toggle('active', parseInt(b.dataset.d, 10) === d));
+  const hint = $('duration-hint');
+  const apply = $('btn-apply-dur');
+  if (currentlyRunning) {
+    if (lastConfirmedDur != null && d !== lastConfirmedDur) {
+      hint.textContent = `Running at ${lastConfirmedDur}s — click Apply to change`;
+      apply.disabled = false;
+    } else {
+      hint.textContent = lastConfirmedDur ? `Currently running at ${lastConfirmedDur}s` : '';
+      apply.disabled = true;
+    }
+  } else {
+    hint.textContent = 'Duration applies on next start';
+    apply.disabled = true;
+  }
+}
+$('duration').addEventListener('input', updateDurUI);
+document.querySelectorAll('.preset').forEach(b =>
+  b.addEventListener('click', () => { $('duration').value = b.dataset.d; updateDurUI(); }));
+
+// ── Actions ─────────────────────────────────────────────────────────
+function getDur() { return parseInt($('duration').value, 10) || 5; }
+
+$('btn-start').addEventListener('click', async () => {
+  try { await postJSON('/api/start', { duration: getDur() }); showToast('Slideshow started'); }
+  catch (e) { showToast('Start failed: ' + e.message, true); }
+  refreshStatus();
+});
+$('btn-stop').addEventListener('click', async () => {
+  try { await postJSON('/api/stop'); showToast('Stopping…'); }
+  catch (e) { showToast('Stop failed: ' + e.message, true); }
+  refreshStatus();
+});
+$('btn-restart').addEventListener('click', async () => {
+  try { await postJSON('/api/restart', { duration: getDur() }); showToast('Restarting…'); }
+  catch (e) { showToast('Restart failed: ' + e.message, true); }
+  refreshStatus();
+});
+$('btn-screen-off').addEventListener('click', async () => {
+  try { await postJSON('/api/screen', { state: 'off' }); showToast('Screen off'); }
+  catch (e) { showToast('Screen off failed: ' + e.message, true); }
+});
+$('btn-screen-on').addEventListener('click', async () => {
+  try { await postJSON('/api/screen', { state: 'on' }); showToast('Screen on'); }
+  catch (e) { showToast('Screen on failed: ' + e.message, true); }
+});
+$('btn-apply-dur').addEventListener('click', async () => {
+  try { await postJSON('/api/setduration', { duration: getDur() });
+        showToast('Duration applied'); lastConfirmedDur = getDur(); updateDurUI(); }
+  catch (e) { showToast('Apply failed: ' + e.message, true); }
+});
+$('btn-fill-cache').addEventListener('click', async () => {
+  const btn = $('btn-fill-cache');
+  btn.disabled = true;
+  try { await postJSON('/api/cache/fill'); showToast('Cache fill started'); }
+  catch (e) { showToast('Fill failed: ' + e.message, true); btn.disabled = false; }
+  refreshCache();
+});
+$('btn-save-schedule').addEventListener('click', async () => {
+  try {
+    await postJSON('/api/schedule/configure', {
+      screen_off_time: $('schedule-off').value,
+      screen_on_time:  $('schedule-on').value,
+    });
+    showToast('Schedule saved');
+  } catch (e) { showToast('Save failed: ' + e.message, true); }
+});
+$('schedule-toggle').addEventListener('change', async (e) => {
+  const url = e.target.checked ? '/api/schedule/enable' : '/api/schedule/disable';
+  try { await postJSON(url); showToast(e.target.checked ? 'Schedule enabled' : 'Schedule disabled'); }
+  catch (e2) { showToast('Toggle failed: ' + e2.message, true); }
+});
+$('btn-rebuild-years').addEventListener('click', async () => {
+  try { await postJSON('/api/rebuildyears'); showToast('Year index rebuilding…'); refreshYears(); }
+  catch (e) { showToast('Rebuild failed: ' + e.message, true); }
+});
+
+// ── Renderers ──────────────────────────────────────────────────────
+function renderPhoto(prefix, p) {
+  const name = $(prefix + '-name'), meta = $(prefix + '-meta');
+  if (!p || p.error) { name.textContent = '—'; meta.innerHTML = ''; return; }
+  name.textContent = p.filename || '—';
+  const bits = [];
+  if (p.source) {
+    const lbl = p.source === 'cache' ? '💾 cache'
+              : p.source === 'local' ? '📁 local' : '☁ network';
+    bits.push(`<span class="src src-${esc(p.source)}">${lbl}</span>`);
+  }
+  if (p.album) bits.push(esc(p.album));
+  if (p.date_taken) {
+    bits.push(esc(p.date_taken.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')));
+  }
+  if (p.dimensions) bits.push(`${p.dimensions.w}×${p.dimensions.h}`);
+  if (p.camera) bits.push(esc(p.camera));
+  meta.innerHTML = bits.join(' · ');
+}
+
+// ── Pollers ────────────────────────────────────────────────────────
+async function refreshStatus() {
+  try {
+    const s = await fetch('/api/status').then(r => r.json());
+    currentlyRunning = !!s.running;
+    $('status-pill').className  = 'pill ' + (s.running ? 'running' : 'stopped');
+    $('status-pill').textContent = s.running ? 'Running' : 'Stopped';
+    $('pid').textContent = s.pid || '—';
+    if (s.running && s.duration) {
+      $('run-dur').textContent = s.duration + 's';
+      if (lastConfirmedDur !== s.duration) {
+        lastConfirmedDur = s.duration;
+        if (!document.activeElement || document.activeElement.id !== 'duration') {
+          $('duration').value = s.duration;
+        }
+      }
+    } else {
+      $('run-dur').textContent = '—';
+      lastConfirmedDur = null;
+    }
+    updateDurUI();
+  } catch (e) { /* swallow — next tick will retry */ }
+}
+async function refreshStats() {
+  try {
+    const d = await fetch('/api/stats').then(r => r.json());
+    $('cpu').textContent = d.cpu.toFixed(1) + '%';
+    $('uptime').textContent = fmtUptime(d.uptime);
+  } catch (e) {}
+}
+async function refreshPhoto() {
+  try {
+    const d = await fetch('/api/currentphoto').then(r => r.json());
+    if (d.total === 0 || d.error) {
+      $('photo-index').textContent = 'No photos';
+      ['curr','prev','next'].forEach(p => renderPhoto(p, null));
+      return;
+    }
+    $('photo-index').textContent = `Photo ${fmtNum(d.index + 1)} of ${fmtNum(d.total)}`;
+    $('photo-bar').style.width = ((d.index + 1) / d.total * 100) + '%';
+    renderPhoto('curr', d.current);
+    renderPhoto('prev', d.previous);
+    renderPhoto('next', d.next);
+  } catch (e) {}
+}
+async function refreshLib() {
+  try {
+    const d = await fetch('/api/photoinfo').then(r => r.json());
+    $('lib-count').textContent = fmtNum(d.count);
+    $('lib-years').textContent = (d.year_min && d.year_max)
+      ? `${d.year_min} – ${d.year_max}` : '—';
+    const parts = [];
+    if (d.jpg)   parts.push(`${fmtNum(d.jpg)} JPEG`);
+    if (d.png)   parts.push(`${fmtNum(d.png)} PNG`);
+    if (d.other) parts.push(`${fmtNum(d.other)} other`);
+    $('lib-formats').textContent = parts.join(', ') || '—';
+  } catch (e) {}
+}
+async function refreshCache() {
+  try {
+    const c = await fetch('/api/cache/status').then(r => r.json());
+    const src = c.photo_dirs_local ? 'Local disk' :
+      `Network${(c.photo_dirs || []).filter(d => d.fstype).map(d => ` (${d.fstype.toUpperCase()})`).join('')}`;
+    $('cache-source').textContent = src;
+    if (!c.enabled) {
+      $('cache-state').textContent = 'Disabled';
+      $('btn-fill-cache').disabled = true;
+      $('cache-bar').style.width = '0%';
+      return;
+    }
+    if (c.photo_dirs_local) {
+      $('cache-state').textContent = 'Not needed (local photos)';
+      $('btn-fill-cache').disabled = true;
+    } else {
+      $('cache-state').textContent = c.filling ? 'Filling…' : 'Ready';
+      $('btn-fill-cache').disabled = !!c.filling;
+    }
+    $('cache-count').textContent    = fmtNum(c.count) + ' photos';
+    $('cache-coverage').textContent = c.total_photos
+      ? `${fmtNum(c.manifest_count)} / ${fmtNum(c.total_photos)} (${c.coverage_pct.toFixed(1)}%)`
+      : '—';
+    $('cache-used').textContent = `${c.used_mb.toFixed(0)} / ${c.size_mb} MB`;
+    $('cache-mode').textContent = c.compress ? `Compressed (q${c.quality})` : 'Full size';
+    const pct = c.size_mb > 0 ? Math.min(100, (c.used_mb / c.size_mb) * 100) : 0;
+    const bar = $('cache-bar');
+    bar.style.width = pct + '%';
+    bar.classList.toggle('warn', pct >= 75 && pct < 95);
+    bar.classList.toggle('danger', pct >= 95);
+  } catch (e) {}
+}
+async function refreshSchedule() {
+  try {
+    const d = await fetch('/api/schedule/status').then(r => r.json());
+    $('schedule-toggle').checked = !!d.enabled;
+    $('schedule-status').textContent = d.enabled
+      ? `Enabled (off ${d.screen_off_time} → on ${d.screen_on_time})`
+      : 'Disabled';
+    if (!document.activeElement || document.activeElement.id !== 'schedule-off')
+      $('schedule-off').value = d.screen_off_time;
+    if (!document.activeElement || document.activeElement.id !== 'schedule-on')
+      $('schedule-on').value = d.screen_on_time;
+  } catch (e) {}
+}
+let yearsSig = '';
+async function refreshYears() {
+  try {
+    const d = await fetch('/api/years').then(r => r.json());
+    const sig = `${d.active}|${d.ready}|${d.years.length}|${d.total}`;
+    if (sig === yearsSig) return;  // identical → skip DOM reflow
+    yearsSig = sig;
+    const grid = $('year-grid');
+    grid.innerHTML = '';
+    const allBtn = document.createElement('button');
+    allBtn.className = 'year-btn' + (d.active ? '' : ' active');
+    allBtn.textContent = `All (${fmtNum(d.total)})`;
+    allBtn.addEventListener('click', () => setYear(null));
+    grid.appendChild(allBtn);
+    d.years.forEach(y => {
+      const b = document.createElement('button');
+      b.className = 'year-btn' + (d.active === y.year ? ' active' : '');
+      b.textContent = `${y.year} (${fmtNum(y.count)})`;
+      b.addEventListener('click', () => setYear(y.year));
+      grid.appendChild(b);
+    });
+  } catch (e) {}
+}
+async function setYear(year) {
+  try { await postJSON('/api/setfilter', { year });
+        showToast(year ? `Filtered to ${year}` : 'Showing all years');
+        yearsSig = ''; refreshYears(); refreshPhoto(); }
+  catch (e) { showToast('Filter failed: ' + e.message, true); }
+}
+
+// ── Boot ───────────────────────────────────────────────────────────
+async function loadHostname() {
+  try {
+    const d = await fetch('/api/hostname').then(r => r.json());
+    $('hostname').textContent = d.hostname;
+    document.title = `${d.hostname} · PapaFrame Lite`;
+  } catch (e) {}
+}
+async function loadUIMode() {
+  try {
+    const d = await fetch('/api/uimode').then(r => r.json());
+    $('lite-reason').textContent = d.reason || 'lite mode';
+  } catch (e) {}
+}
+
+loadHostname();
+loadUIMode();
+refreshStatus();
+refreshStats();
+refreshPhoto();
+refreshLib();
+refreshCache();
+refreshSchedule();
+refreshYears();
+
+// Polling cadence — Pi Zero friendly. Most things change slowly.
+setInterval(refreshStatus,   5000);
+setInterval(refreshStats,   10000);
+setInterval(refreshPhoto,    5000);
+setInterval(refreshLib,     60000);
+setInterval(refreshCache,   15000);
+setInterval(refreshSchedule,30000);
+setInterval(refreshYears,   60000);
+</script>
+</body>
+</html>
