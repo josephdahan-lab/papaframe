@@ -610,7 +610,7 @@ async function doStop() {
 
 // ── Restart ─────────────────────────────────────────────────────────────
 async function doRestart() {
-  const duration = parseInt(durationEl.value, 10) || 5;
+  const duration = parseInt(durationEl.value, 10) || 20;
   setBusy(startBtn); setBusy(stopBtn); setBusy(restartBtn);
   toast('Restarting slideshow…', 'Resuming from current photo', 'info');
   try {
@@ -621,7 +621,14 @@ async function doRestart() {
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    const s = await fetchStatus();
+    // The bash loop takes a few seconds to notice fbi died and respawn it,
+    // so poll status until it's running again or we hit ~30s.
+    let s = null;
+    for (let i = 0; i < 15; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      s = await fetchStatus();
+      if (s?.running) break;
+    }
     if (s?.running) {
       toast('Restarted', `Resumed at ${duration}s per photo`, 'success');
     } else {
