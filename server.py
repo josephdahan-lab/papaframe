@@ -91,6 +91,9 @@ CONFIG_SCHEMA = [
      'Where cached photos are stored (relative paths resolve from the repo root).'),
     ('LITE_UI',           'str', 'Lite web UI',
      '"auto" picks lite on Pi Zero / low-RAM boards. "yes" forces lite; "no" forces full.'),
+    ('SHARED_LOCATION_CACHE', 'str', 'Shared location cache',
+     '"auto" looks at <photo-dir-mount>/.papaframe/location_cache.tsv. '
+     'Explicit path uses that file. Empty / "no" disables sharing (each Pi scans alone).'),
 ]
 
 def write_config(path, updates):
@@ -528,22 +531,100 @@ def _refresh_location_state(cache):
 # so a server restart mid-scan doesn't throw away progress.
 LOCATION_CHUNK = 2000
 
-def build_location_index(force=False):
+def _mount_point(path):
+    """Return the deepest /proc/mounts mountpoint that contains `path`."""
+    try:
+        target = str(Path(path).resolve())
+    except OSError:
+        target = str(path)
+    best = ''
+    try:
+        with open('/proc/mounts') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                mp = parts[1]
+                if target == mp or target.startswith(mp.rstrip('/') + '/'):
+                    if len(mp) >= len(best):
+                        best = mp
+    except OSError:
+        pass
+    return best or '/'
+
+def _shared_location_cache_candidates():
+    """Where to look for a shared location cache, in priority order.
+    Empty list = sharing disabled by config."""
+    raw = str(CONFIG.get('SHARED_LOCATION_CACHE', 'auto')).strip()
+    if raw == '' or raw.lower() in ('no', 'false', 'off', 'none', 'disable', 'disabled'):
+        return []
+    if raw.lower() != 'auto':
+        return [Path(os.path.expandvars(os.path.expanduser(raw)))]
+    # Auto: try /<mountpoint-of-each-photo-dir>/.papaframe/location_cache.tsv.
+    seen, out = set(), []
+    for d in PHOTOS_DIRS:
+        mp = _mount_point(d)
+        if mp and mp not in seen:
+            seen.add(mp)
+            out.append(Path(mp) / '.papaframe' / 'location_cache.tsv')
+    return out
+
+def _sync_shared_location_cache():
+    """Copy a shared cache from the photo share down to LOCATION_CACHE if it's
+    newer than what we have locally. Returns True iff after the call we have a
+    cache that came from a shared source — so callers can skip the local EXIF
+    scan and trust the host's nightly rebuild instead."""
+    for src in _shared_location_cache_candidates():
+        try:
+            src_mtime = src.stat().st_mtime
+        except OSError:
+            continue  # share offline or file missing — try next candidate
+        local_mtime = LOCATION_CACHE.stat().st_mtime if LOCATION_CACHE.exists() else 0
+        if src_mtime <= local_mtime:
+            logger.info(f'Shared location cache {src} not newer than local — '
+                        f'no copy needed')
+            return True
+        try:
+            tmp = LOCATION_CACHE.with_suffix('.tsv.shared.tmp')
+            shutil.copy2(src, tmp)
+            tmp.replace(LOCATION_CACHE)
+            size_kb = LOCATION_CACHE.stat().st_size // 1024
+            logger.info(f'Synced shared location cache from {src} ({size_kb} KB)')
+            return True
+        except Exception as e:
+            logger.error(f'Failed to sync shared cache from {src}: {e}')
+    return False
+
+def build_location_index(force=False, allow_scan=True):
     """Background build of the country→photos index.
 
-    Uses LOCATION_CACHE for photos already classified, and only reads EXIF for
-    newly-seen paths. The cache is persisted and in-memory state is refreshed
-    every LOCATION_CHUNK photos, so long scans survive server restarts and
-    partial results are visible in the UI while the scan continues."""
+    First tries to copy a shared cache from the photo share (built nightly by
+    a host-side cron). If the shared cache is present the per-photo EXIF scan
+    is skipped — the index just loads from the synced file and is ready.
+
+    Otherwise (no share, or sharing disabled), falls back to the local scan:
+    uses LOCATION_CACHE for already-classified photos and only reads EXIF for
+    newly-seen paths. With allow_scan=False (lite mode) the scan is skipped
+    entirely — the index reflects whatever the local cache already contains."""
     def _build():
         state['location_ready'] = False
-        if not _RG_AVAILABLE:
-            logger.warning('reverse_geocoder not installed — location index disabled')
+
+        # Pull from the share before doing any work. If the host has a fresh
+        # cache for us this turns the whole index build into a file copy +
+        # in-memory load — no EXIF reads, no reverse_geocoder roundtrips, and
+        # the location filter is ready in a second or two even on a Pi Zero.
+        shared = _sync_shared_location_cache()
+
+        if not _RG_AVAILABLE and not shared:
+            # Local scan would need reverse_geocoder; without it we can only
+            # display what the shared cache hands us. If neither is available
+            # there's nothing meaningful to do.
+            logger.warning('reverse_geocoder not installed and no shared cache — '
+                           'location index disabled')
             state['location_ready'] = True
             return
 
-        # Run at low priority — this is a long background scan and must never
-        # crowd out the slideshow or the web server.
+        # Run at low priority — only matters if we end up doing a local scan.
         try:
             os.nice(15)
         except Exception:
@@ -566,6 +647,18 @@ def build_location_index(force=False):
         to_scan = [p for p in photos if p not in cache]
         logger.info(f'Location index: {len(photos)} total, '
                     f'{len(cache)} cached, {len(to_scan)} to scan')
+
+        # If a shared cache landed it should already cover every photo. Any
+        # stragglers are a few new photos added since the host's last cron
+        # rebuild — let them stay unclassified until the next sync. We never
+        # want a Pi to start hammering EXIF reads when the whole point of
+        # the share is to avoid exactly that.
+        if shared or not allow_scan:
+            if to_scan and shared:
+                logger.info(f'  {len(to_scan)} photos not in shared cache — '
+                            f'leaving for host\'s next rebuild')
+            state['location_ready'] = True
+            return
 
         def flush(chunk_coords, chunk_paths):
             """Geocode this chunk, merge into the cache, persist, and publish."""
@@ -1800,13 +1893,14 @@ if __name__ == '__main__':
                 f'(low_resource={LOW_RESOURCE}, reason={LOW_RESOURCE_REASON or "n/a"})')
     logger.info('Building year index in background...')
     build_year_index()
-    # Location index does a per-photo EXIF read — even with aggressive pacing,
-    # on Pi Zero over CIFS this can lock up the kernel's CIFS workqueue.
-    # The lite UI omits the location filter, so on lite boards we skip the
-    # whole scan and save the CPU + RAM.
+    # Location index: if a host-built shared cache lives on the share we can
+    # consume it cheaply on any board. Lite mode (Pi Zero) still skips the
+    # local EXIF scan — the whole reason for sharing the cache is to avoid
+    # exactly that — but it'll happily load whatever the share provides.
     if ui_mode == 'lite':
-        logger.info('Lite UI mode: skipping location index (saves CPU + RAM)')
-        state['location_ready'] = True  # so /api/locations returns "no data" cleanly
+        logger.info('Lite UI mode: location index in load-only mode '
+                    '(no local EXIF scan; will pick up shared cache if present)')
+        build_location_index(allow_scan=False)
     else:
         logger.info('Building location index in background...')
         build_location_index()

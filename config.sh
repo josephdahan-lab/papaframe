@@ -49,6 +49,21 @@ CACHE_QUALITY=82
 # root, so the default lands at ~/papaframe/cache.
 CACHE_DIR="cache"
 
+# ── Shared photo-location cache ───────────────────────────────────
+# Per-photo GPS → country lookups for the location filter are expensive
+# (every photo's EXIF read over CIFS) and produce identical results on
+# every Pi sharing the same photo store. So the host that owns the photos
+# can build the cache once (see tools/build_location_cache.py) and drop
+# it on the share itself — every Pi then just copies that file at startup
+# instead of scanning. On a Pi Zero this turns hours of CIFS reads into
+# a sub-second file copy and unblocks the location filter even in lite UI.
+#
+#   "auto" — look at <mount>/.papaframe/location_cache.tsv for each
+#            PHOTO_DIR's mountpoint (recommended)
+#   "/some/path/cache.tsv" — explicit path
+#   ""     — disable sharing; each Pi falls back to scanning locally
+SHARED_LOCATION_CACHE="auto"
+
 # ── Web UI ────────────────────────────────────────────────────────
 # Which dashboard to serve at /. The full UI loads Leaflet + Chart.js and
 # polls aggressively, which is too heavy for a Pi Zero. The lite UI is a
