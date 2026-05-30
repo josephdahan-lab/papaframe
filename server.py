@@ -27,12 +27,26 @@ from PIL.ExifTags import TAGS
 import logging
 
 # Optional offline reverse geocoder — the feature is disabled if missing.
-try:
-    import reverse_geocoder as _rg
-    _RG_AVAILABLE = True
-except Exception:
-    _rg = None
-    _RG_AVAILABLE = False
+# Import is deferred to _load_reverse_geocoder() so numpy+scipy (~84 MB)
+# are never loaded on Pis that use a shared cache and never scan locally.
+_rg = None
+_RG_AVAILABLE = None  # None = not yet checked; True/False after first check
+
+def _load_reverse_geocoder():
+    """Attempt to import reverse_geocoder on first use.  Returns True if
+    available, False otherwise.  The heavy scipy/numpy import only happens
+    if we actually need to geocode — Pis using a shared cache skip it."""
+    global _rg, _RG_AVAILABLE
+    if _RG_AVAILABLE is not None:
+        return _RG_AVAILABLE
+    try:
+        import reverse_geocoder as rg
+        _rg = rg
+        _RG_AVAILABLE = True
+    except Exception:
+        _rg = None
+        _RG_AVAILABLE = False
+    return _RG_AVAILABLE
 
 # Optional ISO country name lookup.
 try:
@@ -780,7 +794,7 @@ def build_location_index(force=False, allow_scan=True):
         # the location filter is ready in a second or two even on a Pi Zero.
         shared = _sync_shared_location_cache()
 
-        if not _RG_AVAILABLE and not shared:
+        if not _load_reverse_geocoder() and not shared:
             # Local scan would need reverse_geocoder; without it we can only
             # display what the shared cache hands us. If neither is available
             # there's nothing meaningful to do.
@@ -2053,7 +2067,7 @@ def api_locations():
         'no_location':  no_loc_count,
         'active':       get_current_location_filter(),
         'ready':        state['location_ready'],
-        'available':    _RG_AVAILABLE,
+        'available':    bool(_RG_AVAILABLE),
     })
 
 @app.route('/api/setlocationfilter', methods=['POST'])
