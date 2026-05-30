@@ -218,9 +218,13 @@ else
     if [ "$WANT_GEOCODER" -eq 0 ]; then rm -f "$REQ_FILE"; fi
 fi
 
-# ── 4. Screen helper + sudoers ──────────────────────────────────────────────
-echo "[4/8] Installing /usr/local/bin/papaframe-screen + sudoers rule…"
+# ── 4. Screen helper + CLI + sudoers ───────────────────────────────────────
+echo "[4/8] Installing /usr/local/bin/papaframe-screen + papaframe CLI + sudoers rule…"
 install -m 0755 "$REPO_ROOT/scripts/papaframe-screen" /usr/local/bin/papaframe-screen
+# CLI wrapper — bake in the repo root so it works from any cwd.
+sed "s|PAPAFRAME_ROOT:-.*}|PAPAFRAME_ROOT:-$REPO_ROOT}|" \
+    "$REPO_ROOT/scripts/papaframe" > /usr/local/bin/papaframe
+chmod 0755 /usr/local/bin/papaframe
 SUDOERS=/etc/sudoers.d/papaframe-screen
 cat > "$SUDOERS" <<EOF
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/bin/papaframe-screen on, /usr/local/bin/papaframe-screen off

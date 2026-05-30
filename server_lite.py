@@ -845,6 +845,10 @@ class PapaFrameHandler(BaseHTTPRequestHandler):
         if path == '/api/hostname':
             return self._json_response(
                 {'hostname': socket.gethostname()})
+        if path == '/api/version':
+            from version import __version__
+            return self._json_response(
+                {'version': __version__, 'variant': 'lite'})
         if path == '/api/uimode':
             return self._api_uimode()
         if path == '/api/stats':
@@ -1242,4 +1246,12 @@ def main():
 
 
 if __name__ == '__main__':
+    import argparse
+    from version import __version__
+
+    parser = argparse.ArgumentParser(description='PapaFrame Server (Lite)')
+    parser.add_argument('--version', action='version',
+                        version=f'PapaFrame {__version__} (lite)')
+    parser.parse_args()
+
     main()

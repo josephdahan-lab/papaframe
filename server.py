@@ -5,6 +5,7 @@ Controls and monitors a Raspberry Pi slideshow display.
 Integrates with start_frame.sh via control files in /tmp.
 """
 
+import argparse
 import ctypes
 import gc
 import hashlib
@@ -1741,6 +1742,15 @@ def api_status():
         'schedule_enabled': bool(state.get('schedule_enabled', True)),
     })
 
+@app.route('/api/version', methods=['GET'])
+def api_version():
+    """Get PapaFrame version."""
+    from version import __version__
+    return jsonify({
+        'version': __version__,
+        'variant': 'full',
+    })
+
 @app.route('/api/hostname', methods=['GET'])
 def api_hostname():
     """Get the system hostname."""
@@ -2271,6 +2281,13 @@ def api_clearsession():
 
 # ── Entry point ────────────────────────────────────────────────────
 if __name__ == '__main__':
+    from version import __version__
+
+    parser = argparse.ArgumentParser(description='PapaFrame Server')
+    parser.add_argument('--version', action='version',
+                        version=f'PapaFrame {__version__}')
+    parser.parse_args()
+
     ui_mode = _resolve_ui_mode()
     logger.info(f'UI mode: {ui_mode} '
                 f'(low_resource={LOW_RESOURCE}, reason={LOW_RESOURCE_REASON or "n/a"})')
