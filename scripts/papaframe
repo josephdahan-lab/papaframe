@@ -9,9 +9,18 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# When installed to /usr/local/bin, REPO_ROOT is baked in at install time.
-# When run from the repo, derive it from the script location.
-REPO_ROOT="${PAPAFRAME_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# When installed to /usr/local/bin, REPO_ROOT is baked in by the installer's
+# sed command.  When run from the repo directly, derive it from the script
+# location.  The fallback glob covers the common ~/papaframe layout.
+if [ -n "${PAPAFRAME_ROOT:-}" ]; then
+    REPO_ROOT="$PAPAFRAME_ROOT"
+elif [ -f "$SCRIPT_DIR/../version.py" ]; then
+    REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+elif [ -f "$HOME/papaframe/version.py" ]; then
+    REPO_ROOT="$HOME/papaframe"
+else
+    REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 
 VERSION_FILE="$REPO_ROOT/version.py"
 
