@@ -810,21 +810,50 @@ def build_location_index(force=False, allow_scan=True):
             pass
 
         # ── Memory-optimised index build ─────────────────────────────
-        # The previous approach held both photo_set (~50 MB) and the full
-        # cache dict (~77 MB) simultaneously, spiking to ~200 MB.  Now we
-        # build the photo_set first, then stream the cache file to produce
-        # only the counts dict (~1 KB) — peak is ~50 MB above baseline.
+        #
+        # Fast path (shared cache + no scan): stream location_cache.tsv
+        # to build just the counts dict (~1 KB).  Never allocates photo_set
+        # or cached_paths — peak is ~0 above baseline.
+        #
+        # Full path (local scan): builds photo_set (~50 MB) to find new
+        # photos, streams the cache to count cached entries, then frees
+        # photo_set before scanning.
 
-        # Step 1: build photo_set by streaming photo_list.txt (~50 MB)
+        if (shared or not allow_scan) and not force:
+            # ── Fast path: stream cache → counts only ────────────────
+            counts = {}
+            n_cached = 0
+            if LOCATION_CACHE.exists():
+                try:
+                    with LOCATION_CACHE.open('r', encoding='utf-8',
+                                             errors='replace') as f:
+                        for line in f:
+                            line = line.rstrip('\n')
+                            if not line:
+                                continue
+                            _, _, cc = line.rpartition('\t')
+                            if cc:
+                                counts[cc] = counts.get(cc, 0) + 1
+                                n_cached += 1
+                except Exception as e:
+                    logger.error(f'Failed to stream location cache: {e}')
+            state['location_counts'] = counts
+            state['location_paths'] = {}
+            total_photos = _total_photo_count()
+            logger.info(f'Location index: {total_photos} total, '
+                        f'{n_cached} cached, 0 to scan')
+            state['location_ready'] = True
+            return
+
+        # ── Full path: build photo_set to find uncached photos ───────
         photo_set = set()
         for p in _iter_photo_paths():
             photo_set.add(p)
         total_photos = len(photo_set)
 
-        # Step 2: stream location_cache.tsv → counts + to_scan.
-        # Never build the full 360k-entry cache dict in memory.
-        counts = {}     # cc → count  (tiny, ~20 entries)
-        cached_paths = set() if not force else set()  # for to_scan calc
+        # Stream location_cache.tsv → counts + identify cached paths.
+        counts = {}
+        cached_paths = set()
         if not force and LOCATION_CACHE.exists():
             try:
                 with LOCATION_CACHE.open('r', encoding='utf-8',
@@ -840,35 +869,20 @@ def build_location_index(force=False, allow_scan=True):
             except Exception as e:
                 logger.error(f'Failed to stream location cache: {e}')
 
-        # to_scan = photo paths with no cache entry
         to_scan = [p for p in photo_set if p not in cached_paths]
         del cached_paths
-
-        # Step 3: free photo_set + trim memory
         del photo_set
         gc.collect()
         _malloc_trim()
 
-        # Publish counts (tiny)
         state['location_counts'] = counts
-        state['location_paths'] = {}  # deliberately NOT kept in memory
+        state['location_paths'] = {}
         if counts:
             state['location_ready'] = True
 
         n_cached = sum(counts.values())
         logger.info(f'Location index: {total_photos} total, '
                     f'{n_cached} cached, {len(to_scan)} to scan')
-
-        # If a shared cache landed it should already cover every photo.
-        if shared or not allow_scan:
-            if to_scan and shared:
-                logger.info(f'  {len(to_scan)} photos not in shared cache — '
-                            f'leaving for host\'s next rebuild')
-            del to_scan
-            gc.collect()
-            _malloc_trim()
-            state['location_ready'] = True
-            return
 
         # ── Local EXIF scan (only when shared cache unavailable) ─────
         # Load the full cache dict only for this path — this is rare
