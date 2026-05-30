@@ -5,7 +5,10 @@ Controls and monitors a Raspberry Pi slideshow display.
 Integrates with start_frame.sh via control files in /tmp.
 """
 
+import ctypes
+import gc
 import hashlib
+import sys
 import json
 import os
 import re
@@ -256,6 +259,7 @@ YEAR_FILTER     = Path('/tmp/frame_year_filter.txt')
 LOCATION_FILTER = Path('/tmp/frame_location_filter.txt')
 FILTERED_LIST   = Path('/tmp/frame_filtered_list.txt')
 SLIDESHOW_STATE = Path('/tmp/frame_slideshow_state.json')
+SCHEDULE_OFF_FLAG = Path('/tmp/frame_schedule_off')
 
 # Persistent location cache: one line per photo, "<path>\t<cc>".
 # "cc" is an ISO-3166-1 alpha-2 country code, or "-" for no GPS / unknown.
@@ -341,7 +345,11 @@ VIEWER_NAMES = ('fbi', 'feh', 'eog', 'display')
 def _scan_viewer_pid():
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
-            if proc.info['name'] in VIEWER_NAMES:
+            name = proc.info['name']
+            if name in VIEWER_NAMES:
+                return proc.info['pid']
+            cmdline = proc.info.get('cmdline') or []
+            if any('fbviewer.py' in arg for arg in cmdline):
                 return proc.info['pid']
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
@@ -414,15 +422,35 @@ def get_current_location_filter():
     val = _read_file(LOCATION_FILTER)
     return val or None
 
+# ── Memory management ────────────────────────────────────────────
+def _malloc_trim():
+    """Ask glibc to return freed memory to the OS.  Python's pymalloc
+    keeps small-object arenas forever; malloc_trim(0) releases the
+    underlying mmap'd regions once pymalloc frees them.  No-op on
+    non-glibc platforms."""
+    try:
+        ctypes.CDLL('libc.so.6').malloc_trim(0)
+    except Exception:
+        pass
+
 # ── Photo list helpers ────────────────────────────────────────────
-def get_photos():
-    """Get the full photo list from the source file."""
+def _iter_photo_paths():
+    """Yield non-empty lines from SOURCE_FILE one at a time.
+    Avoids loading 326k paths into a list (which costs ~90 MB that
+    pymalloc never returns to the OS)."""
     try:
         if SOURCE_FILE.exists():
-            return [l for l in SOURCE_FILE.read_text().splitlines() if l.strip()]
+            with SOURCE_FILE.open('r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    p = line.rstrip('\n')
+                    if p:
+                        yield p
     except Exception as e:
         logger.error(f'Error reading source file: {e}')
-    return []
+
+def get_photos():
+    """Get the full photo list from the source file."""
+    return list(_iter_photo_paths())
 
 def get_live_photos():
     """Get the current shuffled slideshow list."""
@@ -490,15 +518,16 @@ def build_year_index():
     def _build():
         state['year_index_ready'] = False
         index = {}
-        photos = get_photos()
-        for p in photos:
+        count = 0
+        for p in _iter_photo_paths():
+            count += 1
             m = YEAR_RE.search(p)
             if m:
                 year = int(m.group(1))
                 index[year] = index.get(year, 0) + 1
         state['year_index'] = index
         state['year_index_ready'] = True
-        logger.info(f'Year index built: {len(index)} years from {len(photos)} photos')
+        logger.info(f'Year index built: {len(index)} years from {count} photos')
     t = threading.Thread(target=_build, daemon=True)
     t.start()
 
@@ -570,14 +599,40 @@ def country_name(cc):
     return cc
 
 def _refresh_location_state(cache):
-    """Rebuild in-memory buckets from the path→cc cache."""
+    """Rebuild in-memory counts from the path→cc cache.
+
+    Only keeps the tiny counts dict in RAM (~20 entries).  The full
+    path lists per country are read on demand from LOCATION_CACHE
+    by _load_paths_for_cc(), saving ~70 MB of resident memory on a
+    360 k-photo library."""
     counts = {}
-    paths_by_cc = {}
-    for p, cc in cache.items():
+    for cc in cache.values():
         counts[cc] = counts.get(cc, 0) + 1
-        paths_by_cc.setdefault(cc, []).append(p)
     state['location_counts'] = counts
-    state['location_paths']  = paths_by_cc
+    # location_paths deliberately NOT kept in memory — see
+    # _load_paths_for_cc() for the on-demand reader.
+    state['location_paths'] = {}
+
+
+def _load_paths_for_cc(cc):
+    """Read paths for a single country code from the on-disk cache.
+    Returns a list of path strings.  Reads the file sequentially so
+    peak memory is one line at a time — not 360 k strings."""
+    paths = []
+    if not LOCATION_CACHE.exists():
+        return paths
+    try:
+        with LOCATION_CACHE.open('r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.rstrip('\n')
+                if not line:
+                    continue
+                path, _, file_cc = line.rpartition('\t')
+                if file_cc == cc:
+                    paths.append(path)
+    except Exception as e:
+        logger.error(f'Failed to read paths for {cc}: {e}')
+    return paths
 
 # Cache is flushed to disk and exposed to the UI every this many new photos,
 # so a server restart mid-scan doesn't throw away progress.
@@ -682,22 +737,29 @@ def build_location_index(force=False, allow_scan=True):
         except Exception:
             pass
 
-        photos = get_photos()
         cache = {} if force else _load_location_cache()
 
-        # Drop stale entries up front so buckets never show removed photos.
-        photo_set = set(photos)
+        # Build a set of current photo paths to prune stale entries,
+        # then discard the set to free ~50 MB.  We stream the file
+        # line-by-line to avoid a 326k-element list allocation.
+        photo_set = set()
+        to_scan = []
+        for p in _iter_photo_paths():
+            photo_set.add(p)
+            if p not in cache:
+                to_scan.append(p)
+        total_photos = len(photo_set)
         cache = {p: cc for p, cc in cache.items() if p in photo_set}
+        del photo_set  # free ~50 MB immediately
+        import gc; gc.collect()
+        _malloc_trim()
 
-        # Publish whatever we already know before scanning anything new —
-        # this is what lets the UI show country buttons immediately after a
-        # restart when the cache from a previous run is present.
+        # Publish counts (tiny) then drop the cache dict to free ~70 MB.
         _refresh_location_state(cache)
         if cache:
             state['location_ready'] = True
 
-        to_scan = [p for p in photos if p not in cache]
-        logger.info(f'Location index: {len(photos)} total, '
+        logger.info(f'Location index: {total_photos} total, '
                     f'{len(cache)} cached, {len(to_scan)} to scan')
 
         # If a shared cache landed it should already cover every photo. Any
@@ -709,6 +771,9 @@ def build_location_index(force=False, allow_scan=True):
             if to_scan and shared:
                 logger.info(f'  {len(to_scan)} photos not in shared cache — '
                             f'leaving for host\'s next rebuild')
+            del cache  # free ~70 MB — counts are already in state
+            gc.collect()
+            _malloc_trim()
             state['location_ready'] = True
             return
 
@@ -820,15 +885,171 @@ def _should_be_off(now_hm, off_hm, on_hm):
         return off_hm <= now_hm < on_hm
     return now_hm >= off_hm or now_hm < on_hm
 
-def _set_screen(want):
-    """Toggle the HDMI display; logs and swallows errors so the scheduler keeps running."""
+def _kill_viewer_and_wait(timeout=5):
+    """Kill the image viewer (fbi or fbviewer) and wait for it to exit."""
+    pid = get_viewer_pid()
+    if not pid:
+        return
     try:
-        subprocess.run(
-            ['sudo', '-n', '/usr/local/bin/papaframe-screen', want],
-            capture_output=True, timeout=5, check=False,
-        )
+        proc = psutil.Process(pid)
+        proc.terminate()
+        proc.wait(timeout=timeout)
+    except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+        pass
+    _pid_cache['viewer'] = None
+    _pid_cache['viewer_ts'] = 0
+
+# ── DRM-based screen power ───────────────────────────────────────
+# The vc4 driver on the Pi resets DPMS to "On" when the last DRM fd
+# closes.  modetest, setterm, and any one-shot tool therefore cannot
+# keep the screen off.  The fix: spawn a helper subprocess that holds
+# the DRM fd open with DPMS:Off for the entire blanking period.
+# When the screen should turn on, we kill the helper and the fd closes.
+_dpms_proc = None   # subprocess.Popen holding the DRM fd, or None
+_dpms_lock = threading.Lock()
+
+# Inline Python script run as a subprocess.  It opens /dev/dri/card0,
+# acquires DRM master, sets DPMS to Off via libdrm, then sleeps until
+# killed (SIGTERM).  The key behaviour: the DRM fd stays open, so
+# DPMS stays Off.  When the process dies the fd auto-closes and the
+# driver resets DPMS to On — which is exactly what we want.
+_DPMS_OFF_SCRIPT = r'''
+import os, signal, sys, time, ctypes, fcntl, struct
+
+fd = os.open("/dev/dri/card0", os.O_RDWR)
+try:
+    fcntl.ioctl(fd, 0x0000641e, 0)       # DRM_IOCTL_SET_MASTER
+except OSError:
+    pass
+
+libdrm = ctypes.CDLL("libdrm.so.2")
+
+# Use drmModeConnectorSetProperty directly — prop_id 2 is DPMS on
+# every vc4 Pi we've tested.  As a safety check, verify via
+# drmModeObjectGetProperties first.
+libdrm.drmModeObjectGetProperties.restype = ctypes.c_void_p
+libdrm.drmModeGetProperty.restype = ctypes.c_void_p
+
+# Find DPMS property ID the safe way (no manual struct-offset parsing)
+def find_dpms(fd, conn_id):
+    """Walk connector properties to find the DPMS prop ID."""
+    # Use drmModeGetConnector which returns a fully typed struct
+    class drmModeConnector(ctypes.Structure):
+        _fields_ = [
+            ("connector_id", ctypes.c_uint32),
+            ("encoder_id", ctypes.c_uint32),
+            ("connector_type", ctypes.c_uint32),
+            ("connector_type_id", ctypes.c_uint32),
+            ("connection", ctypes.c_uint32),
+            ("mmWidth", ctypes.c_uint32),
+            ("mmHeight", ctypes.c_uint32),
+            ("subpixel", ctypes.c_uint32),
+            ("count_modes", ctypes.c_int),
+            ("modes", ctypes.c_void_p),
+            ("count_props", ctypes.c_int),
+            ("props", ctypes.c_void_p),       # uint32_t *
+            ("prop_values", ctypes.c_void_p), # uint64_t *
+            ("count_encoders", ctypes.c_int),
+            ("encoders", ctypes.c_void_p),
+        ]
+    libdrm.drmModeGetConnector.restype = ctypes.POINTER(drmModeConnector)
+    conn = libdrm.drmModeGetConnector(fd, conn_id)
+    if not conn:
+        return None
+    c = conn.contents
+    for i in range(c.count_props):
+        pid = ctypes.cast(c.props + i * 4,
+                          ctypes.POINTER(ctypes.c_uint32))[0]
+        pp = libdrm.drmModeGetProperty(fd, pid)
+        if pp:
+            # drmModePropertyRes: prop_id(4) + flags(4) + name(32)
+            name = ctypes.string_at(pp + 8, 32).split(b"\x00")[0]
+            libdrm.drmModeFreeProperty(pp)
+            if name == b"DPMS":
+                libdrm.drmModeFreeConnector(conn)
+                return pid
+    libdrm.drmModeFreeConnector(conn)
+    return None
+
+CONN_ID = 33
+dpms_id = find_dpms(fd, CONN_ID)
+if dpms_id is None:
+    sys.stderr.write("dpms-helper: DPMS property not found\n")
+    os.close(fd)
+    sys.exit(1)
+
+ret = libdrm.drmModeConnectorSetProperty(fd, CONN_ID, dpms_id, 3)
+if ret != 0:
+    sys.stderr.write(f"dpms-helper: SetProperty returned {ret}\n")
+    os.close(fd)
+    sys.exit(1)
+
+sys.stdout.write("OK\n")
+sys.stdout.flush()
+
+# Sleep until killed.  The DRM fd stays open → DPMS stays Off.
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+signal.signal(signal.SIGINT,  lambda *_: sys.exit(0))
+while True:
+    time.sleep(3600)
+'''
+
+def _set_screen(want):
+    """Toggle the HDMI display on or off.
+
+    For 'off': kill the viewer, spawn a helper that holds the DRM fd
+    open with DPMS:Off.
+
+    For 'on': kill the DPMS helper (fd auto-closes → DPMS resets to On),
+    then poke the VT for good measure."""
+    global _dpms_proc
+
+    try:
+        if want == 'off':
+            _kill_viewer_and_wait()
+            with _dpms_lock:
+                # Already blanked?
+                if _dpms_proc is not None and _dpms_proc.poll() is None:
+                    return
+                # Spawn the helper.  It prints "OK" once DPMS is set.
+                proc = subprocess.Popen(
+                    [sys.executable, '-c', _DPMS_OFF_SCRIPT],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
+                )
+                try:
+                    line = proc.stdout.readline()  # blocks until "OK\n"
+                    if b'OK' in line:
+                        _dpms_proc = proc
+                        logger.info('Screen off: DPMS helper running '
+                                    f'(pid={proc.pid})')
+                    else:
+                        err = proc.stderr.read().decode(errors='replace')
+                        proc.kill()
+                        logger.error(f'DPMS helper failed: {err}')
+                except Exception as e:
+                    proc.kill()
+                    logger.error(f'DPMS helper start error: {e}')
+
+        elif want == 'on':
+            with _dpms_lock:
+                if _dpms_proc is not None:
+                    _dpms_proc.terminate()
+                    try:
+                        _dpms_proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        _dpms_proc.kill()
+                    _dpms_proc = None
+                    logger.info('Screen on: DPMS helper killed, fd released')
+            # Belt-and-suspenders: poke the VT unblank too
+            subprocess.run(
+                ['sudo', '-n', '/usr/local/bin/papaframe-screen', 'on'],
+                capture_output=True, timeout=10, check=False,
+            )
+
     except Exception as e:
-        logger.error(f'Schedule screen-{want} failed: {e}')
+        logger.error(f'Screen {want} failed: {e}')
 
 def _launch_frame_script():
     """Spawn start_frame.sh in a fresh session (used to resume after a scheduled pause)."""
@@ -854,12 +1075,19 @@ def _apply_schedule_state(desired):
         # repeated ticks within it (the slideshow will already be stopped).
         if not state.get('screen_scheduled_off', False):
             state['slideshow_was_running_before_schedule'] = running_now
+        # Tell the tty1 wrapper not to relaunch start_frame.sh.  Written
+        # *before* the stop flag so the wrapper sees it by the time the
+        # bash process exits and getty auto-logins again.
+        _write_file(SCHEDULE_OFF_FLAG, '1')
         if running_now:
             _write_file(STOP_FLAG, '1')
         _set_screen('off')
         state['screen_scheduled_off'] = True
         state['slideshow_paused_by_schedule'] = True
     else:
+        # Remove the gate *before* turning the screen on so the wrapper
+        # is free to (re)launch start_frame.sh immediately.
+        SCHEDULE_OFF_FLAG.unlink(missing_ok=True)
         _set_screen('on')
         if (state.get('slideshow_paused_by_schedule', False)
                 and state.get('slideshow_was_running_before_schedule', False)
@@ -882,10 +1110,19 @@ def _run_scheduler():
                 off_hm = state.get('screen_off_time', (23, 59))
                 on_hm  = state.get('screen_on_time',  (6,  0))
                 desired = 'off' if _should_be_off(now_hm, off_hm, on_hm) else 'on'
-                if desired != state.get('last_scheduled_state'):
-                    logger.info(f'Schedule transition: -> {desired} '
-                                f'(off={off_hm[0]:02d}:{off_hm[1]:02d}, '
-                                f'on={on_hm[0]:02d}:{on_hm[1]:02d})')
+                # Re-apply if the DPMS helper died while we should be off
+                helper_alive = (_dpms_proc is not None
+                                and _dpms_proc.poll() is None)
+                need_reapply = (desired == 'off'
+                                and desired == state.get('last_scheduled_state')
+                                and not helper_alive)
+                if desired != state.get('last_scheduled_state') or need_reapply:
+                    if need_reapply:
+                        logger.warning('DPMS helper died — re-blanking screen')
+                    else:
+                        logger.info(f'Schedule transition: -> {desired} '
+                                    f'(off={off_hm[0]:02d}:{off_hm[1]:02d}, '
+                                    f'on={on_hm[0]:02d}:{on_hm[1]:02d})')
                     _apply_schedule_state(desired)
                     state['last_scheduled_state'] = desired
         except Exception as e:
@@ -1232,7 +1469,7 @@ def _start_cache_worker():
 
 def _write_filtered_list(cc):
     """Write the location-filtered photo list to FILTERED_LIST."""
-    paths = state['location_paths'].get(cc, [])
+    paths = _load_paths_for_cc(cc)
     FILTERED_LIST.write_text('\n'.join(paths) + ('\n' if paths else ''))
     return len(paths)
 
@@ -1534,21 +1771,26 @@ def api_setduration():
 # ── API: Photo info ────────────────────────────────────────────────
 @app.route('/api/photoinfo', methods=['GET'])
 def api_photoinfo():
-    """Get photo library info from the source list."""
-    photos = get_photos()
-    jpg_count = sum(1 for p in photos if p.lower().endswith(('.jpg', '.jpeg')))
-    png_count = sum(1 for p in photos if p.lower().endswith('.png'))
-    other_count = len(photos) - jpg_count - png_count
+    """Get photo library info from the source list.
+    Streams the file to avoid a ~90 MB transient list allocation."""
+    total = jpg_count = png_count = 0
+    for p in _iter_photo_paths():
+        total += 1
+        low = p.lower()
+        if low.endswith(('.jpg', '.jpeg')):
+            jpg_count += 1
+        elif low.endswith('.png'):
+            png_count += 1
 
     # Get year range from the index if available, otherwise skip
     years = list(state['year_index'].keys()) if state['year_index_ready'] else []
     return jsonify({
-        'count': len(photos),
+        'count': total,
         'year_min': min(years) if years else None,
         'year_max': max(years) if years else None,
         'jpg': jpg_count,
         'png': png_count,
-        'other': other_count,
+        'other': total - jpg_count - png_count,
     })
 
 @app.route('/api/photo/thumb', methods=['GET'])
@@ -1729,7 +1971,7 @@ def api_setlocationfilter():
     if cc:
         if not state['location_ready']:
             return jsonify({'error': 'Location index not ready yet'}), 400
-        if cc not in state['location_paths']:
+        if cc not in state['location_counts']:
             return jsonify({'error': f'Unknown location: {cc}'}), 400
         count = _write_filtered_list(cc)
         _write_file(LOCATION_FILTER, cc)
@@ -1762,21 +2004,20 @@ def api_rebuildlocations():
 # ── API: Screen power ─────────────────────────────────────────────
 @app.route('/api/screen', methods=['POST'])
 def api_screen():
-    """Blank or wake the HDMI display by toggling the DRM connector status.
-    We run headless on the framebuffer, so no X tools (xset DPMS) are available;
-    the root-only write is delegated to /usr/local/bin/papaframe-screen."""
+    """Blank or wake the HDMI display via the DRM DPMS mechanism.
+    Uses _set_screen() which holds the DRM fd open to prevent the vc4
+    driver from resetting DPMS when the fd closes."""
     data = request.json or {}
     want = (data.get('state') or '').lower()
     if want not in ('on', 'off'):
         return jsonify({'error': "state must be 'on' or 'off'"}), 400
 
     try:
-        res = subprocess.run(
-            ['sudo', '-n', '/usr/local/bin/papaframe-screen', want],
-            capture_output=True, text=True, check=False,
-        )
-        if res.returncode != 0:
-            raise RuntimeError(res.stderr.strip() or 'papaframe-screen failed')
+        if want == 'off':
+            _write_file(STOP_FLAG, '1')
+        _set_screen(want)
+        if want == 'on':
+            STOP_FLAG.unlink(missing_ok=True)
     except Exception as e:
         logger.error(f'Screen control failed: {e}')
         return jsonify({'error': str(e)}), 500

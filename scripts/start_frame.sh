@@ -76,11 +76,13 @@ else
 fi
 
 # ── Environment detection and viewer selection ────────────────────────────────
-FORCE_VIEWER="${FORCE_VIEWER:-auto}"  # Options: auto, fbi, feh, eog, display
+FORCE_VIEWER="${FORCE_VIEWER:-auto}"  # Options: auto, fbviewer, fbi, feh, eog, display
 DESKTOP_ENV=$(detect_desktop_environment)
 FRAMEBUFFER_DEVICE=$(detect_framebuffer)
 AVAILABLE_VT=$(detect_available_vt "${FBI_VT:-1}")
 SELECTED_VIEWER=""
+FBVIEWER="$REPO_ROOT/scripts/fbviewer.py"
+PYTHON="$REPO_ROOT/.venv/bin/python3"
 
 # Determine which viewer to use
 if [ "$FORCE_VIEWER" != "auto" ]; then
@@ -89,8 +91,11 @@ else
     # Auto-select based on environment
     case "$DESKTOP_ENV" in
         console)
-            # Console-only: use framebuffer viewer
-            if [ "$FRAMEBUFFER_DEVICE" != "none" ] && command -v fbi > /dev/null 2>&1; then
+            # Console-only: prefer fbviewer (low resource, no DRM master)
+            # over fbi, with feh as last resort.
+            if [ -c /dev/fb0 ] && [ -f "$FBVIEWER" ] && [ -x "$PYTHON" ]; then
+                SELECTED_VIEWER="fbviewer"
+            elif [ "$FRAMEBUFFER_DEVICE" != "none" ] && command -v fbi > /dev/null 2>&1; then
                 SELECTED_VIEWER="fbi"
             elif command -v feh > /dev/null 2>&1; then
                 SELECTED_VIEWER="feh"
@@ -350,6 +355,15 @@ while true; do
 
     # Launch appropriate viewer based on environment
     case "$SELECTED_VIEWER" in
+        fbviewer)
+            # Minimal Python framebuffer viewer — writes directly to /dev/fb0.
+            # Uses ~19 MB RSS vs fbi's ~40 MB+, never grabs DRM master (so
+            # setterm --blank force works for screen-off), and handles one
+            # image at a time with no readahead buffering.
+            "$PYTHON" "$FBVIEWER" "$DISPLAY_LIST" 2>/dev/null &
+            VIEWER_PID=$!
+            echo "fbviewer started (PID $VIEWER_PID), ${CUR_DURATION}s per photo"
+            ;;
         fbi)
             # Framebuffer image viewer - runs on Linux virtual terminal without X.
             # FBI_DEVICE is auto-detected each cycle (or pinned in config.sh).

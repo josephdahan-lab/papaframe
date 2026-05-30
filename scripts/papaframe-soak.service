@@ -1,0 +1,14 @@
+[Unit]
+Description=PapaFrame soak-test logger
+After=network-online.target papaframe-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=joseph
+ExecStart=/home/joseph/papaframe/scripts/soak_logger.sh
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

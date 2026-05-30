@@ -1,31 +1,43 @@
 #!/bin/bash
 # PapaFrame screen power helper.
 #
-# Toggles the HDMI connector on or off via the DRM sysfs status file
-# (DPMS-style). Must run as root because /sys/class/drm is root-owned;
-# the install script wires up a passwordless sudoers rule so the web
-# server can call it as `sudo -n papaframe-screen on|off`.
+# Uses the kernel's VT force-blank (setterm) so that console writes on
+# tty1 cannot undo the blank.  Falls back to modetest DPMS when setterm
+# is unavailable.  The caller (server.py) is responsible for stopping
+# fbi first so that DRM master is free.
 #
-# Auto-detects the connector so this works on Pi Zero/3 (single card,
-# HDMI on card0) and Pi 4/5 (HDMI on card1) without configuration.
+# Must run as root; the install script wires up a passwordless sudoers rule.
 set -e
 
-# Pick the first HDMI port whose status is anything other than "disconnected".
-# - "connected" → screen is on, normal case
-# - "off"       → we already DPMS'd it off; same connector is the right target
-CONNECTOR=""
-for f in /sys/class/drm/card*-HDMI-*/status; do
-    [ -f "$f" ] || continue
-    [ "$(cat "$f")" != "disconnected" ] && { CONNECTOR="$f"; break; }
-done
+ACTION="${1:-}"
+case "$ACTION" in
+    on|off) ;;
+    *)      echo "usage: $0 on|off" >&2; exit 2 ;;
+esac
 
-if [ -z "$CONNECTOR" ]; then
-    echo "papaframe-screen: no active HDMI connector found under /sys/class/drm" >&2
-    exit 1
-fi
+FBCON="/sys/class/vtconsole/vtcon1/bind"
 
-case "${1:-}" in
-    off) echo off > "$CONNECTOR" ;;
-    on)  echo on  > "$CONNECTOR" ;;
-    *)   echo "usage: $0 on|off" >&2; exit 2 ;;
+get_conn_id() {
+    modetest -M vc4 -c 2>/dev/null \
+        | awk '/connected.*HDMI/ && !/disconnected/ {print $1; exit}'
+}
+
+case "$ACTION" in
+    off)
+        # Ensure fbcon is bound — it bridges VT blanking to DRM/DPMS.
+        # A previous run (or the old script) may have unbound it.
+        [ -f "$FBCON" ] && echo 1 > "$FBCON"
+        # Force-blank the VT.  The kernel propagates this through
+        # fbcon → DRM → DPMS:off.  Force-blank is immune to console
+        # writes — only an explicit "poke" undoes it.  setterm's ioctl
+        # goes to stdin, so stdin must be the real console tty.
+        TERM=linux setterm --blank force </dev/tty1 >/dev/tty1 2>/dev/null || true
+        ;;
+    on)
+        # Unblank the VT, then ensure DPMS is on.
+        TERM=linux setterm --blank poke </dev/tty1 >/dev/tty1 2>/dev/null || true
+        CONN_ID="$(get_conn_id)"
+        [ -n "$CONN_ID" ] && modetest -M vc4 -w "$CONN_ID":DPMS:0 >/dev/null 2>&1 || true
+        [ -f "$FBCON" ] && echo 1 > "$FBCON"
+        ;;
 esac
