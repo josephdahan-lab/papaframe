@@ -461,6 +461,63 @@ def get_live_photos():
         logger.error(f'Error reading live list: {e}')
     return []
 
+def _live_photo_count():
+    """Count lines in the live list without loading it into memory."""
+    try:
+        if not LIVE_LIST.exists():
+            return 0
+        n = 0
+        with LIVE_LIST.open('rb') as f:
+            for line in f:
+                if line.strip():
+                    n += 1
+        return n
+    except Exception:
+        return 0
+
+def _live_photo_at(idx):
+    """Read a single photo path from the live list by line index.
+    Returns (path, total_lines) without loading the full list."""
+    try:
+        if not LIVE_LIST.exists():
+            return None, 0
+        n = 0
+        result = None
+        with LIVE_LIST.open('r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                p = line.rstrip('\n')
+                if not p:
+                    continue
+                if n == idx:
+                    result = p
+                n += 1
+        # If idx was past end, wrap
+        if result is None and n > 0:
+            return _live_photo_at(idx % n)
+        return result, n
+    except Exception:
+        return None, 0
+
+def _live_photo_slice(start, end):
+    """Read a slice of photo paths from the live list by line index.
+    Returns (list_of_paths, total_lines) without loading the full list."""
+    try:
+        if not LIVE_LIST.exists():
+            return [], 0
+        n = 0
+        result = []
+        with LIVE_LIST.open('r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                p = line.rstrip('\n')
+                if not p:
+                    continue
+                if start <= n < end:
+                    result.append(p)
+                n += 1
+        return result, n
+    except Exception:
+        return [], 0
+
 def get_photo_year(path):
     """Extract year from photo EXIF data or fallback to file mtime."""
     try:
@@ -737,45 +794,71 @@ def build_location_index(force=False, allow_scan=True):
         except Exception:
             pass
 
-        cache = {} if force else _load_location_cache()
+        # ── Memory-optimised index build ─────────────────────────────
+        # The previous approach held both photo_set (~50 MB) and the full
+        # cache dict (~77 MB) simultaneously, spiking to ~200 MB.  Now we
+        # build the photo_set first, then stream the cache file to produce
+        # only the counts dict (~1 KB) — peak is ~50 MB above baseline.
 
-        # Build a set of current photo paths to prune stale entries,
-        # then discard the set to free ~50 MB.  We stream the file
-        # line-by-line to avoid a 326k-element list allocation.
+        # Step 1: build photo_set by streaming photo_list.txt (~50 MB)
         photo_set = set()
-        to_scan = []
         for p in _iter_photo_paths():
             photo_set.add(p)
-            if p not in cache:
-                to_scan.append(p)
         total_photos = len(photo_set)
-        cache = {p: cc for p, cc in cache.items() if p in photo_set}
-        del photo_set  # free ~50 MB immediately
-        import gc; gc.collect()
+
+        # Step 2: stream location_cache.tsv → counts + to_scan.
+        # Never build the full 360k-entry cache dict in memory.
+        counts = {}     # cc → count  (tiny, ~20 entries)
+        cached_paths = set() if not force else set()  # for to_scan calc
+        if not force and LOCATION_CACHE.exists():
+            try:
+                with LOCATION_CACHE.open('r', encoding='utf-8',
+                                         errors='replace') as f:
+                    for line in f:
+                        line = line.rstrip('\n')
+                        if not line:
+                            continue
+                        path, _, cc = line.rpartition('\t')
+                        if path and cc and path in photo_set:
+                            counts[cc] = counts.get(cc, 0) + 1
+                            cached_paths.add(path)
+            except Exception as e:
+                logger.error(f'Failed to stream location cache: {e}')
+
+        # to_scan = photo paths with no cache entry
+        to_scan = [p for p in photo_set if p not in cached_paths]
+        del cached_paths
+
+        # Step 3: free photo_set + trim memory
+        del photo_set
+        gc.collect()
         _malloc_trim()
 
-        # Publish counts (tiny) then drop the cache dict to free ~70 MB.
-        _refresh_location_state(cache)
-        if cache:
+        # Publish counts (tiny)
+        state['location_counts'] = counts
+        state['location_paths'] = {}  # deliberately NOT kept in memory
+        if counts:
             state['location_ready'] = True
 
+        n_cached = sum(counts.values())
         logger.info(f'Location index: {total_photos} total, '
-                    f'{len(cache)} cached, {len(to_scan)} to scan')
+                    f'{n_cached} cached, {len(to_scan)} to scan')
 
-        # If a shared cache landed it should already cover every photo. Any
-        # stragglers are a few new photos added since the host's last cron
-        # rebuild — let them stay unclassified until the next sync. We never
-        # want a Pi to start hammering EXIF reads when the whole point of
-        # the share is to avoid exactly that.
+        # If a shared cache landed it should already cover every photo.
         if shared or not allow_scan:
             if to_scan and shared:
                 logger.info(f'  {len(to_scan)} photos not in shared cache — '
                             f'leaving for host\'s next rebuild')
-            del cache  # free ~70 MB — counts are already in state
+            del to_scan
             gc.collect()
             _malloc_trim()
             state['location_ready'] = True
             return
+
+        # ── Local EXIF scan (only when shared cache unavailable) ─────
+        # Load the full cache dict only for this path — this is rare
+        # on production Pis that get a shared cache from the NAS.
+        cache = _load_location_cache()
 
         def flush(chunk_coords, chunk_paths):
             """Geocode this chunk, merge into the cache, persist, and publish."""
@@ -800,12 +883,6 @@ def build_location_index(force=False, allow_scan=True):
         seen_since_flush = 0
         slow_streak = 0
         for p in to_scan:
-            # Pace EXIF reads to the health of the SMB share. _get_photo_gps
-            # opens each photo over CIFS-over-WiFi; firing reads at a struggling
-            # share flat-out wedges the kernel's CIFS workers in uninterruptible
-            # D-state and can lock the Pi up hard. Sleeping at least as long as
-            # a slow read took holds our request rate below what the share can
-            # absorb, so the CIFS workqueue keeps draining.
             t0 = time.monotonic()
             gps = _get_photo_gps(p)
             elapsed = time.monotonic() - t0
@@ -813,15 +890,13 @@ def build_location_index(force=False, allow_scan=True):
                 slow_streak += 1
                 time.sleep(min(elapsed, 5.0))
                 if slow_streak >= 20:
-                    # Share is clearly unhealthy — stand down so the CIFS
-                    # workqueue can drain before we pile on more load.
                     logger.warning('Location index: SMB share slow — '
                                     'backing off 60s')
                     time.sleep(60)
                     slow_streak = 0
             else:
                 slow_streak = 0
-                time.sleep(0.02)  # gentle baseline pacing when the share is fast
+                time.sleep(0.02)
 
             if gps is None:
                 cache[p] = NO_LOC
@@ -836,12 +911,15 @@ def build_location_index(force=False, allow_scan=True):
                 seen_since_flush = 0
                 logger.info(
                     f'Location index progress: '
-                    f'{len(cache)}/{len(photos)} '
-                    f'({100*len(cache)/max(1,len(photos)):.1f}%)'
+                    f'{len(cache)}/{total_photos} '
+                    f'({100*len(cache)/max(1,total_photos):.1f}%)'
                 )
 
         # Final flush for the remainder.
         flush(chunk_coords, chunk_paths)
+        del cache
+        gc.collect()
+        _malloc_trim()
         logger.info(f'Location index complete: {len(state["location_counts"])} buckets')
 
     t = threading.Thread(target=_build, daemon=True)
@@ -1824,25 +1902,19 @@ def api_photo_thumb():
 
 @app.route('/api/currentphoto', methods=['GET'])
 def api_currentphoto():
-    """Get current, previous, and next photo based on elapsed time since fbi started.
-    fbi advances through the filelist at a fixed interval, so:
-        index = floor((now - started_at) / duration) % total"""
-    photos = get_live_photos()
-    if not photos:
+    """Get current, previous, and next photo based on elapsed time.
+    Uses streaming to avoid loading the full 326k-line list (~90 MB)."""
+    total = _live_photo_count()
+    if total == 0:
         return jsonify({
-            'current': None,
-            'previous': None,
-            'next': None,
-            'index': 0,
-            'total': 0,
-            'error': 'No photos',
+            'current': None, 'previous': None, 'next': None,
+            'index': 0, 'total': 0, 'error': 'No photos',
         })
 
     # Calculate current position from elapsed time
     ss = get_slideshow_state()
     started_at = ss.get('started_at', 0)
     duration = ss.get('duration', DEFAULT_DURATION)
-    total = len(photos)
 
     if started_at and duration and is_running():
         elapsed = time.time() - started_at
@@ -1850,9 +1922,22 @@ def api_currentphoto():
     else:
         idx = 0
 
-    # Resolve each photo's source: 'local' if PHOTO_DIRS are on local disk
-    # (cache is irrelevant), 'cache' if the manifest has a substitution for
-    # it, otherwise 'network'.
+    prev_idx = (idx - 1) % total
+    next_idx = (idx + 1) % total
+
+    # Read only the 3 paths we need (prev, current, next)
+    # Optimise: if they're consecutive, one slice covers them
+    need = sorted(set([prev_idx, idx, next_idx]))
+    if need[-1] - need[0] < total:
+        paths_slice, _ = _live_photo_slice(need[0], need[-1] + 1)
+        path_map = {need[0] + i: p for i, p in enumerate(paths_slice)}
+    else:
+        # Wrapping around the end of the list
+        path_map = {}
+        for n in need:
+            p, _ = _live_photo_at(n)
+            path_map[n] = p
+
     local_mode = _photo_dirs_are_local()
     manifest_paths = set() if local_mode else _load_cache_manifest_paths(
         _cache_settings()['dir'])
@@ -1863,6 +1948,8 @@ def api_currentphoto():
         return 'cache' if path in manifest_paths else 'network'
 
     def photo_details(path):
+        if path is None:
+            return None
         try:
             cached = _get_cached_exif(path)
             return {
@@ -1878,13 +1965,10 @@ def api_currentphoto():
             logger.error(f'Error reading photo {path}: {e}')
             return {'path': path, 'error': str(e), 'source': photo_source(path)}
 
-    prev_idx = (idx - 1) % total
-    next_idx = (idx + 1) % total
-
     return jsonify({
-        'current': photo_details(photos[idx]),
-        'previous': photo_details(photos[prev_idx]) if total > 1 else None,
-        'next': photo_details(photos[next_idx]) if total > 1 else None,
+        'current': photo_details(path_map.get(idx)),
+        'previous': photo_details(path_map.get(prev_idx)) if total > 1 else None,
+        'next': photo_details(path_map.get(next_idx)) if total > 1 else None,
         'index': idx,
         'total': total,
     })
@@ -2114,40 +2198,43 @@ def api_stats():
 _GPS_CACHE_MAX = 500
 _gps_cache = {}
 
-def _get_current_index():
-    """Calculate which photo fbi is currently showing based on elapsed time."""
-    photos = get_live_photos()
-    if not photos:
-        return 0, photos
+def _get_current_index_and_total():
+    """Calculate which photo is currently showing based on elapsed time.
+    Returns (idx, total) without loading the full photo list."""
+    total = _live_photo_count()
+    if total == 0:
+        return 0, 0
     ss = get_slideshow_state()
     started_at = ss.get('started_at', 0)
     duration = ss.get('duration', DEFAULT_DURATION)
     if started_at and duration and is_running():
         elapsed = time.time() - started_at
-        return int(elapsed / duration) % len(photos), photos
-    return 0, photos
+        return int(elapsed / duration) % total, total
+    return 0, total
 
 @app.route('/api/sessionpoints', methods=['GET'])
 def api_sessionpoints():
     """Get GPS points from photos already shown in the current session.
-    Uses elapsed time to determine how far fbi has advanced through the list,
-    then returns GPS data for photos 0..current_index."""
-    idx, photos = _get_current_index()
-    if not photos:
+    Uses streaming to read only the shown slice from the 326k-line list."""
+    idx, total = _get_current_index_and_total()
+    if total == 0:
         return jsonify([])
 
-    # Only scan photos that have already been displayed (0 to idx inclusive)
-    shown = photos[:idx + 1]
+    # Only read photos 0..idx (the ones already displayed)
+    shown, _ = _live_photo_slice(0, idx + 1)
     points = []
-    for p in shown:
+    current_gps = None
+    for i, p in enumerate(shown):
         # Check cache first
         if p in _gps_cache:
             cached = _gps_cache[p]
             if cached is not None:
                 points.append(cached)
+            if i == idx:
+                current_gps = cached
             continue
-        # Read EXIF for GPS (use cached EXIF when available)
-        exif = _get_cached_exif(p) if p not in _gps_cache else get_photo_exif(p)
+        # Read EXIF for GPS
+        exif = _get_cached_exif(p)
         if len(_gps_cache) >= _GPS_CACHE_MAX:
             for old_key in list(_gps_cache)[:_GPS_CACHE_MAX // 2]:
                 del _gps_cache[old_key]
@@ -2162,11 +2249,10 @@ def api_sessionpoints():
             }
             _gps_cache[p] = point
             points.append(point)
+            if i == idx:
+                current_gps = point
         else:
             _gps_cache[p] = None
-
-    # Current photo GPS (already cached from the loop above)
-    current_gps = _gps_cache.get(photos[idx])
 
     return jsonify({'points': points, 'current': current_gps})
 

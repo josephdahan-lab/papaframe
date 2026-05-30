@@ -64,30 +64,40 @@ done
 
 RAM_MB=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 1024 ))
 
-if [ "$ARCH" = "armv6l" ]; then
-    HAS_WHEELS=0          # no Pillow/scipy wheels for armv6
-    WANT_GEOCODER=0       # reverse_geocoder needs scipy — unbuildable here
+# Decide between the full server (Flask + PIL + psutil) and the lite server
+# (stdlib only, ~20 MB RSS). The lite server is used on boards where the full
+# server OOMs or is too slow: armv6l (Pi Zero / Pi 1) and any board with
+# ≤700 MB RAM. The lite server provides: slideshow control, schedule,
+# landing page with controls and basic info — but no cache filling, no
+# thumbnails, no location index, no admin config editor.
+USE_LITE=0
+if [ "$ARCH" = "armv6l" ] || [ "$RAM_MB" -le 700 ]; then
+    USE_LITE=1
+fi
+# Override: if the user explicitly set PAPAFRAME_FULL=1, use full regardless.
+if [ "${PAPAFRAME_FULL:-0}" = "1" ]; then
+    USE_LITE=0
+fi
+
+if [ "$USE_LITE" -eq 1 ]; then
+    HAS_WHEELS=0
+    WANT_GEOCODER=0
+    SERVER_SCRIPT="server_lite.py"
+    PLAN_DESC="lite server — stdlib only, no venv needed"
+    UI_HINT="lite server + lite UI (auto: armv6 or ≤700 MB RAM)"
+elif [ "$ARCH" = "armv6l" ]; then
+    HAS_WHEELS=0
+    WANT_GEOCODER=0
+    SERVER_SCRIPT="server.py"
     PLAN_DESC="armv6 — build Pillow from source, reuse Debian Python packages"
+    UI_HINT="full dashboard"
 else
     HAS_WHEELS=1
     WANT_GEOCODER=1
+    SERVER_SCRIPT="server.py"
     PLAN_DESC="prebuilt wheels available — straight pip install"
+    UI_HINT="full dashboard"
 fi
-
-# Web UI variant: lite on Pi Zero (low CPU + RAM), full elsewhere. The server
-# picks at runtime from LITE_UI=auto in config.sh, so the installer only
-# needs to surface the choice in the summary banner. Both pages are always
-# shipped — /lite and /full force the variant for testing.
-case "$PI_MODEL" in
-    *Zero*|*"Pi 1"*) UI_HINT="lite (Pi Zero / low-resource board)" ;;
-    *)
-        if [ "$ARCH" = "armv6l" ] || [ "$RAM_MB" -le 700 ]; then
-            UI_HINT="lite (auto: armv6 or ≤700 MB RAM)"
-        else
-            UI_HINT="full dashboard"
-        fi
-        ;;
-esac
 
 # Low-RAM boards need swap so a from-source Pillow build is not OOM-killed.
 if [ "$RAM_MB" -lt 1024 ]; then LOW_RAM=1; else LOW_RAM=0; fi
@@ -129,6 +139,7 @@ echo "    user:    $TARGET_USER  (home: $TARGET_HOME)"
 echo "    board:   $PI_MODEL"
 echo "    arch:    $ARCH, ${RAM_MB} MB RAM"
 echo "    display: $DISPLAY_HINT"
+echo "    server:  $SERVER_SCRIPT"
 echo "    web UI:  $UI_HINT"
 echo "    plan:    $PLAN_DESC"
 echo "═══════════════════════════════════════════════════"
@@ -139,16 +150,22 @@ echo "[1/8] Installing system packages…"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 
-APT_PKGS=(fbi python3 python3-venv python3-pip git curl ca-certificates)
-if [ "$HAS_WHEELS" -eq 0 ]; then
-    # No wheels → Pillow compiles from source: needs headers + build tooling.
-    # Debian's python3-* packages are reused by the venv (step 3) so the heavy
-    # libraries do not all have to build from scratch.
-    APT_PKGS+=(python3-dev libjpeg-dev zlib1g-dev libfreetype-dev)
-    APT_PKGS+=(python3-pil python3-flask python3-psutil python3-pycountry)
-    echo "       armv6 board — adding Pillow build deps + Debian Python packages."
+if [ "$USE_LITE" -eq 1 ]; then
+    # Lite server is stdlib-only — no pip packages needed, no venv.
+    APT_PKGS=(fbi python3 git curl ca-certificates)
+    echo "       Lite server — minimal packages, no Python dependencies."
 else
-    echo "       Wheels available — skipping Pillow build dependencies."
+    APT_PKGS=(fbi python3 python3-venv python3-pip git curl ca-certificates)
+    if [ "$HAS_WHEELS" -eq 0 ]; then
+        # No wheels → Pillow compiles from source: needs headers + build tooling.
+        # Debian's python3-* packages are reused by the venv (step 3) so the heavy
+        # libraries do not all have to build from scratch.
+        APT_PKGS+=(python3-dev libjpeg-dev zlib1g-dev libfreetype-dev)
+        APT_PKGS+=(python3-pil python3-flask python3-psutil python3-pycountry)
+        echo "       armv6 board — adding Pillow build deps + Debian Python packages."
+    else
+        echo "       Wheels available — skipping Pillow build dependencies."
+    fi
 fi
 apt-get install -y --no-install-recommends "${APT_PKGS[@]}"
 
@@ -157,45 +174,49 @@ echo "[2/8] Adding $TARGET_USER to video group…"
 usermod -aG video "$TARGET_USER"
 
 # ── 3. Python venv + requirements ───────────────────────────────────────────
-echo "[3/8] Creating Python venv at $REPO_ROOT/.venv…"
-VENV_ARGS=()
-if [ "$HAS_WHEELS" -eq 0 ]; then
-    # Let the venv see Debian's python3-pil/flask/psutil/pycountry instead of
-    # building them all from source.
-    VENV_ARGS+=(--system-site-packages)
-fi
-if [ ! -d "$REPO_ROOT/.venv" ]; then
-    sudo -u "$TARGET_USER" python3 -m venv "${VENV_ARGS[@]}" "$REPO_ROOT/.venv"
-fi
-
-# A from-source Pillow build OOM-kills on a 512 MB board without swap.
-if [ "$HAS_WHEELS" -eq 0 ] && [ "$LOW_RAM" -eq 1 ]; then
-    ensure_swap 512
-fi
-
-PIP="$REPO_ROOT/.venv/bin/pip"
-# --retries/--timeout: a single dropped connection on Pi Wi-Fi should not abort
-# the whole install. --prefer-binary: take a wheel over an sdist when offered.
-PIP_NET=(--retries 10 --timeout 120 --prefer-binary)
-echo "       Upgrading pip + wheel…"
-sudo -u "$TARGET_USER" "$PIP" install --upgrade --quiet "${PIP_NET[@]}" pip wheel
-
-REQ_FILE="$REPO_ROOT/requirements.txt"
-if [ "$WANT_GEOCODER" -eq 0 ]; then
-    # reverse_geocoder pulls scipy, which has no armv6 wheels and will not
-    # build on a Pi Zero. server.py already runs fine without it.
-    echo "       Skipping reverse_geocoder (needs scipy — no armv6 wheels)."
-    REQ_FILE="$(mktemp)"
-    grep -vi '^reverse_geocoder' "$REPO_ROOT/requirements.txt" > "$REQ_FILE"
-    chmod 0644 "$REQ_FILE"
-fi
-if [ "$HAS_WHEELS" -eq 0 ]; then
-    echo "       Installing Python requirements (Pillow builds from source — slow)…"
+if [ "$USE_LITE" -eq 1 ]; then
+    echo "[3/8] Skipping venv — lite server uses system Python only."
 else
-    echo "       Installing Python requirements…"
+    echo "[3/8] Creating Python venv at $REPO_ROOT/.venv…"
+    VENV_ARGS=()
+    if [ "$HAS_WHEELS" -eq 0 ]; then
+        # Let the venv see Debian's python3-pil/flask/psutil/pycountry instead of
+        # building them all from source.
+        VENV_ARGS+=(--system-site-packages)
+    fi
+    if [ ! -d "$REPO_ROOT/.venv" ]; then
+        sudo -u "$TARGET_USER" python3 -m venv "${VENV_ARGS[@]}" "$REPO_ROOT/.venv"
+    fi
+
+    # A from-source Pillow build OOM-kills on a 512 MB board without swap.
+    if [ "$HAS_WHEELS" -eq 0 ] && [ "$LOW_RAM" -eq 1 ]; then
+        ensure_swap 512
+    fi
+
+    PIP="$REPO_ROOT/.venv/bin/pip"
+    # --retries/--timeout: a single dropped connection on Pi Wi-Fi should not abort
+    # the whole install. --prefer-binary: take a wheel over an sdist when offered.
+    PIP_NET=(--retries 10 --timeout 120 --prefer-binary)
+    echo "       Upgrading pip + wheel…"
+    sudo -u "$TARGET_USER" "$PIP" install --upgrade --quiet "${PIP_NET[@]}" pip wheel
+
+    REQ_FILE="$REPO_ROOT/requirements.txt"
+    if [ "$WANT_GEOCODER" -eq 0 ]; then
+        # reverse_geocoder pulls scipy, which has no armv6 wheels and will not
+        # build on a Pi Zero. server.py already runs fine without it.
+        echo "       Skipping reverse_geocoder (needs scipy — no armv6 wheels)."
+        REQ_FILE="$(mktemp)"
+        grep -vi '^reverse_geocoder' "$REPO_ROOT/requirements.txt" > "$REQ_FILE"
+        chmod 0644 "$REQ_FILE"
+    fi
+    if [ "$HAS_WHEELS" -eq 0 ]; then
+        echo "       Installing Python requirements (Pillow builds from source — slow)…"
+    else
+        echo "       Installing Python requirements…"
+    fi
+    sudo -u "$TARGET_USER" "$PIP" install --quiet "${PIP_NET[@]}" -r "$REQ_FILE"
+    if [ "$WANT_GEOCODER" -eq 0 ]; then rm -f "$REQ_FILE"; fi
 fi
-sudo -u "$TARGET_USER" "$PIP" install --quiet "${PIP_NET[@]}" -r "$REQ_FILE"
-if [ "$WANT_GEOCODER" -eq 0 ]; then rm -f "$REQ_FILE"; fi
 
 # ── 4. Screen helper + sudoers ──────────────────────────────────────────────
 echo "[4/8] Installing /usr/local/bin/papaframe-screen + sudoers rule…"
@@ -254,6 +275,16 @@ fi
 # ── 8. Systemd unit for the web server ──────────────────────────────────────
 echo "[8/8] Installing papaframe-server systemd unit…"
 UNIT=/etc/systemd/system/papaframe-server.service
+
+if [ "$USE_LITE" -eq 1 ]; then
+    PYTHON_BIN="/usr/bin/python3"
+    MEMORY_LIMITS="MemoryMax=80M
+MemoryHigh=50M"
+else
+    PYTHON_BIN="$REPO_ROOT/.venv/bin/python3"
+    MEMORY_LIMITS=""
+fi
+
 cat > "$UNIT" <<EOF
 [Unit]
 Description=PapaFrame web server
@@ -264,9 +295,10 @@ Wants=network-online.target
 Type=simple
 User=$TARGET_USER
 WorkingDirectory=$REPO_ROOT
-ExecStart=$REPO_ROOT/.venv/bin/python3 $REPO_ROOT/server.py
+ExecStart=$PYTHON_BIN $REPO_ROOT/$SERVER_SCRIPT
 Restart=on-failure
 RestartSec=5
+$MEMORY_LIMITS
 
 [Install]
 WantedBy=multi-user.target
