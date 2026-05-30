@@ -110,7 +110,17 @@
       "Bash(ssh joseph@pictureframedidier2.local \"pgrep -f 'server\\\\.py'; ps aux | grep server\")",
       "Bash(python3 -c \"import py_compile; py_compile.compile\\('server.py', doraise=True\\)\")",
       "Bash(ssh joseph@pictureframedidier2.local \"pkill -f 'python3.*server.py' 2>/dev/null; sleep 2; echo > ~/papaframe/frame_display.log; nohup ~/papaframe/.venv/bin/python3 ~/papaframe/server.py >> ~/papaframe/frame_display.log 2>&1 </dev/null &\")",
-      "Bash(ssh joseph@pictureframedidier2.local \"pgrep -f 'python3.*server.py'; curl -s http://localhost:8000/api/status | head -c 200; echo\")"
+      "Bash(ssh joseph@pictureframedidier2.local \"pgrep -f 'python3.*server.py'; curl -s http://localhost:8000/api/status | head -c 200; echo\")",
+      "Bash(scp /home/joseph/papaframe/server.py joseph@pictureframedidier2.local:~/papaframe/server.py)",
+      "Bash(ssh joseph@pictureframedidier2.local \"kill \\\\$\\(ps aux | grep 'python3.*server.py' | grep -v grep | awk '{print \\\\$2}' | head -1\\) 2>/dev/null; sleep 2; cd ~/papaframe && nohup .venv/bin/python3 server.py >> frame_display.log 2>&1 </dev/null & echo PID=\\\\$!\")",
+      "Bash(timeout 3 python3 server_lite.py)",
+      "Bash(python3 -c \"import py_compile; py_compile.compile\\('server_lite.py', doraise=True\\)\")",
+      "Bash(bash -n scripts/install.sh)",
+      "Bash(sudo cp /home/joseph/papaframe/scripts/papaframe /usr/local/bin/papaframe)",
+      "Bash(sudo chmod 755 /usr/local/bin/papaframe)",
+      "Bash(papaframe version *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

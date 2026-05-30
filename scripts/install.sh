@@ -222,7 +222,7 @@ fi
 echo "[4/8] Installing /usr/local/bin/papaframe-screen + papaframe CLI + sudoers rule…"
 install -m 0755 "$REPO_ROOT/scripts/papaframe-screen" /usr/local/bin/papaframe-screen
 # CLI wrapper — bake in the repo root so it works from any cwd.
-sed "s|PAPAFRAME_ROOT:-.*}|PAPAFRAME_ROOT:-$REPO_ROOT}|" \
+sed "s|^REPO_ROOT=.*|REPO_ROOT=\"$REPO_ROOT\"|" \
     "$REPO_ROOT/scripts/papaframe" > /usr/local/bin/papaframe
 chmod 0755 /usr/local/bin/papaframe
 SUDOERS=/etc/sudoers.d/papaframe-screen
