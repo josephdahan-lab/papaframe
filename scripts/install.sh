@@ -152,7 +152,9 @@ apt-get update -qq
 
 if [ "$USE_LITE" -eq 1 ]; then
     # Lite server is stdlib-only — no pip packages needed, no venv.
-    APT_PKGS=(fbi python3 git curl ca-certificates)
+    # libjpeg-turbo-progs provides djpeg, used by fbviewer.py to decode
+    # JPEG photos without Pillow (~130 KB installed).
+    APT_PKGS=(fbi python3 git curl ca-certificates libjpeg-turbo-progs)
     echo "       Lite server — minimal packages, no Python dependencies."
 else
     APT_PKGS=(fbi python3 python3-venv python3-pip git curl ca-certificates)

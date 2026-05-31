@@ -82,7 +82,12 @@ FRAMEBUFFER_DEVICE=$(detect_framebuffer)
 AVAILABLE_VT=$(detect_available_vt "${FBI_VT:-1}")
 SELECTED_VIEWER=""
 FBVIEWER="$REPO_ROOT/scripts/fbviewer.py"
-PYTHON="$REPO_ROOT/.venv/bin/python3"
+# Prefer the venv Python, fall back to system Python (lite installs have no venv).
+if [ -x "$REPO_ROOT/.venv/bin/python3" ]; then
+    PYTHON="$REPO_ROOT/.venv/bin/python3"
+else
+    PYTHON="$(command -v python3 2>/dev/null || true)"
+fi
 
 # Determine which viewer to use
 if [ "$FORCE_VIEWER" != "auto" ]; then
