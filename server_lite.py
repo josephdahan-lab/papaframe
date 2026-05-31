@@ -47,6 +47,70 @@ CONFIG_PATH = Path(os.environ.get('PAPAFRAME_CONFIG',
                                   Path(__file__).parent / 'config.sh'))
 CONFIG = load_config(CONFIG_PATH)
 
+# Schema of keys editable from the admin page. Order controls form layout.
+# Each entry: (key, type, label, help text)
+CONFIG_SCHEMA = [
+    ('PHOTO_DIRS',        'str', 'Photo folders',
+     'Colon-separated list of folders to scan recursively for photos.'),
+    ('DEFAULT_DURATION',  'int', 'Default duration (seconds)',
+     'Seconds each photo is shown when no override is set.'),
+    ('RESHUFFLE_INTERVAL', 'int', 'Reshuffle interval (seconds)',
+     'How often the slideshow list is reshuffled in the background.'),
+    ('FORCE_VIEWER',      'str', 'Image viewer',
+     'auto (recommended), fbviewer, fbi, feh, eog, or display.'),
+    ('FBI_VT',            'str', 'Virtual terminal for fbi',
+     '"auto" picks the best available; otherwise a number 1-7.'),
+    ('SERVER_HOST',       'str', 'Server bind address',
+     '0.0.0.0 listens on every interface; 127.0.0.1 is local only.'),
+    ('SERVER_PORT',       'int', 'Server port',
+     'TCP port the web UI listens on.'),
+    ('SOURCE_FILE',       'str', 'Master photo list path',
+     'File that stores the full list of photos (rebuilt if missing).'),
+    ('FRAME_SCRIPT',      'str', 'Slideshow launcher script',
+     'Path to start_frame.sh — the bash script that runs the viewer.'),
+    ('LOG_FILE',          'str', 'Server log file',
+     'Log output path (relative to server.py if not absolute).'),
+    ('CACHE_SIZE_MB',     'int', 'Photo cache size (MB)',
+     'Local cache budget in megabytes. 0 disables the cache.'),
+    ('CACHE_COMPRESS',    'bool', 'Compress cached photos',
+     'On: resize to fit 1920x1080 and re-encode as JPEG. Off: copy originals verbatim.'),
+    ('CACHE_QUALITY',     'int', 'Cache JPEG quality',
+     'JPEG quality 1-100 for compressed cache entries (ignored if compression is off).'),
+    ('CACHE_DIR',         'str', 'Cache folder',
+     'Where cached photos are stored (relative paths resolve from the repo root).'),
+    ('LITE_UI',           'str', 'Lite web UI',
+     '"auto" picks lite on Pi Zero / low-RAM boards. "yes" forces lite; "no" forces full.'),
+    ('SHARED_LOCATION_CACHE', 'str', 'Shared location cache',
+     '"auto" looks at <photo-dir-mount>/.papaframe/location_cache.tsv. '
+     'Explicit path uses that file. Empty / "no" disables sharing (each Pi scans alone).'),
+]
+
+def write_config(path, updates):
+    """Rewrite config.sh in place, replacing only the values for known keys.
+    Preserves comments, blank lines, and unknown keys."""
+    if not path.exists():
+        raise FileNotFoundError(f'config file not found: {path}')
+    lines = path.read_text().splitlines()
+    key_re = re.compile(r'^(?P<key>[A-Z_][A-Z0-9_]*)=')
+    out = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith('#') or '=' not in stripped:
+            out.append(line)
+            continue
+        m = key_re.match(stripped)
+        if not m or m.group('key') not in updates:
+            out.append(line)
+            continue
+        key = m.group('key')
+        val = updates[key]
+        if isinstance(val, int) or (isinstance(val, str) and val.isdigit()):
+            out.append(f'{key}={val}')
+        else:
+            safe = str(val).replace('"', '\\"')
+            out.append(f'{key}="{safe}"')
+    path.write_text('\n'.join(out) + '\n')
+
 def _cfg(key, default):
     return CONFIG.get(key, default)
 
@@ -863,6 +927,8 @@ class PapaFrameHandler(BaseHTTPRequestHandler):
             return self._api_schedule_status()
         if path == '/api/cache/status':
             return self._api_cache_status()
+        if path == '/api/config':
+            return self._api_config_get()
 
         # Static file fallback (CSS, JS, images, favicon, etc.)
         # Strip leading / so it's relative to static/
@@ -891,6 +957,8 @@ class PapaFrameHandler(BaseHTTPRequestHandler):
             '/api/schedule/enable':    self._api_schedule_enable,
             '/api/schedule/disable':   self._api_schedule_disable,
             '/api/cache/fill':         self._api_cache_fill,
+            '/api/config':             self._api_config_set,
+            '/api/config/rebuild':     self._api_config_rebuild,
         }
 
         handler = routes.get(path)
@@ -1212,6 +1280,61 @@ class PapaFrameHandler(BaseHTTPRequestHandler):
             {'error': 'Cache filling is not available on the lite server. '
                       'Use the full server or fill from another Pi.'},
             501)
+
+    # ── Config endpoints (admin page) ────────────────────────────────
+
+    def _api_config_get(self):
+        cfg = load_config(CONFIG_PATH)
+        fields = []
+        for key, typ, label, help_text in CONFIG_SCHEMA:
+            fields.append({
+                'key': key,
+                'type': typ,
+                'label': label,
+                'help': help_text,
+                'value': cfg.get(key, ''),
+            })
+        return self._json_response({
+            'path': str(CONFIG_PATH),
+            'fields': fields,
+        })
+
+    def _api_config_set(self, data):
+        updates = {}
+        for key, typ, _label, _help in CONFIG_SCHEMA:
+            if key not in data:
+                continue
+            raw = data[key]
+            if typ == 'int':
+                try:
+                    updates[key] = int(raw)
+                except (TypeError, ValueError):
+                    return self._json_response(
+                        {'error': f'{key} must be an integer'}, 400)
+            elif typ == 'bool':
+                updates[key] = ('yes' if str(raw).strip().lower()
+                                in ('yes', 'true', '1', 'on') else 'no')
+            else:
+                updates[key] = str(raw)
+        if not updates:
+            return self._json_response(
+                {'error': 'no known keys provided'}, 400)
+        try:
+            write_config(CONFIG_PATH, updates)
+        except Exception as e:
+            logger.error(f'Failed to write config: {e}')
+            return self._json_response({'error': str(e)}, 500)
+        logger.info(f'Config updated: {list(updates.keys())}')
+        return self._json_response(
+            {'success': True, 'updated': list(updates.keys())})
+
+    def _api_config_rebuild(self, data):
+        try:
+            SOURCE_FILE.unlink(missing_ok=True)
+            logger.info(f'Deleted {SOURCE_FILE} for rebuild')
+            return self._json_response({'success': True})
+        except Exception as e:
+            return self._json_response({'error': str(e)}, 500)
 
 
 # ── Entry point ────────────────────────────────────────────────────
