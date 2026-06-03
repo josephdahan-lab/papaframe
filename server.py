@@ -256,6 +256,53 @@ logging.basicConfig(filename=_cfg('LOG_FILE', 'frame_display.log'),
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ── HTTP cache headers ────────────────────────────────────────────
+# Reduces redundant network traffic by telling browsers to cache static
+# assets and use conditional requests (ETag / 304) for API polls.
+
+@app.after_request
+def _add_cache_headers(response):
+    """Set Cache-Control and ETag headers based on the response type.
+    Static assets get long caches (busted by version query string).
+    API JSON gets short caches with ETag for 304 Not Modified support."""
+    path = request.path
+
+    # Static assets: cache aggressively (1 hour), version-bust in HTML.
+    if path.endswith(('.css', '.js', '.svg', '.png', '.jpg', '.ico')):
+        response.headers['Cache-Control'] = 'public, max-age=3600, immutable'
+        return response
+
+    # HTML pages: short cache, revalidate on use.
+    if response.content_type and 'text/html' in response.content_type:
+        response.headers['Cache-Control'] = 'public, max-age=60, must-revalidate'
+        return response
+
+    # API JSON: allow caching with ETag for conditional requests.
+    if response.content_type and 'application/json' in response.content_type:
+        # Stable endpoints that rarely change get longer cache.
+        if path in ('/api/hostname', '/api/version', '/api/environment'):
+            response.headers['Cache-Control'] = 'public, max-age=300'
+        elif path in ('/api/photoinfo', '/api/years', '/api/locations',
+                      '/api/cache/status'):
+            response.headers['Cache-Control'] = 'public, max-age=10, must-revalidate'
+        else:
+            # Fast-changing: /api/status, /api/currentphoto, /api/stats
+            response.headers['Cache-Control'] = 'public, max-age=5, must-revalidate'
+
+        # Generate ETag from response body so browsers can use If-None-Match.
+        data = response.get_data()
+        etag = hashlib.md5(data).hexdigest()
+        response.headers['ETag'] = f'"{etag}"'
+
+        # Check If-None-Match from the client.
+        client_etag = request.headers.get('If-None-Match')
+        if client_etag and client_etag.strip('" ') == etag:
+            response.status_code = 304
+            response.set_data(b'')
+            response.headers.pop('Content-Length', None)
+
+    return response
+
 # ── User-tunable settings (from config.sh) ────────────────────────
 PHOTOS_DIRS     = [Path(os.path.expandvars(os.path.expanduser(p)))
                    for p in _cfg('PHOTO_DIRS', '$HOME/Pictures').split(':') if p]

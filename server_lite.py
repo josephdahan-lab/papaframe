@@ -843,9 +843,31 @@ class PapaFrameHandler(BaseHTTPRequestHandler):
     # ── Routing helpers ───────────────────────────────────────────
     def _json_response(self, data, status=200):
         body = json.dumps(data).encode('utf-8')
+
+        # ETag for conditional requests — saves bandwidth on unchanged polls.
+        etag = hashlib.md5(body).hexdigest()
+        client_etag = self.headers.get('If-None-Match', '').strip('" ')
+        if client_etag == etag and status == 200:
+            self.send_response(304)
+            self.send_header('ETag', f'"{etag}"')
+            self.end_headers()
+            return
+
+        # Cache-Control: stable endpoints get longer caches.
+        parsed_path = urlparse(self.path).path.rstrip('/')
+        if parsed_path in ('/api/hostname', '/api/version'):
+            cc = 'public, max-age=300'
+        elif parsed_path in ('/api/photoinfo', '/api/years',
+                             '/api/cache/status', '/api/schedule/status'):
+            cc = 'public, max-age=10, must-revalidate'
+        else:
+            cc = 'public, max-age=5, must-revalidate'
+
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', cc)
+        self.send_header('ETag', f'"{etag}"')
         self.end_headers()
         self.wfile.write(body)
 
@@ -859,7 +881,7 @@ class PapaFrameHandler(BaseHTTPRequestHandler):
             return {}
 
     def _serve_static(self, rel_path, content_type=None):
-        """Serve a file from the static/ directory."""
+        """Serve a file from the static/ directory with cache headers."""
         static_dir = REPO_ROOT / 'static'
         fpath = (static_dir / rel_path).resolve()
         # Prevent directory traversal
@@ -881,10 +903,32 @@ class PapaFrameHandler(BaseHTTPRequestHandler):
                 '.jpg':  'image/jpeg',
                 '.ico':  'image/x-icon',
             }.get(ext, 'application/octet-stream')
+
+        # ETag: use file mtime + size — check BEFORE reading file data
+        # so 304 responses skip the disk read entirely.
+        stat = fpath.stat()
+        etag = f'{stat.st_mtime_ns:x}-{stat.st_size:x}'
+        client_etag = self.headers.get('If-None-Match', '').strip('" ')
+        if client_etag == etag:
+            self.send_response(304)
+            self.send_header('ETag', f'"{etag}"')
+            self.end_headers()
+            return
+
         data = fpath.read_bytes()
+
+        # Cache policy: assets cache for 1 hour, HTML for 60s.
+        ext = fpath.suffix.lower()
+        if ext in ('.css', '.js', '.svg', '.png', '.jpg', '.ico'):
+            cache = 'public, max-age=3600, immutable'
+        else:
+            cache = 'public, max-age=60, must-revalidate'
+
         self.send_response(200)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', cache)
+        self.send_header('ETag', f'"{etag}"')
         self.end_headers()
         self.wfile.write(data)
 
