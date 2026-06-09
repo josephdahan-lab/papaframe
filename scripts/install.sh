@@ -247,6 +247,7 @@ cat > "$DROPIN_DIR/autologin.conf" <<EOF
 ExecStart=
 ExecStart=-/sbin/agetty --autologin $TARGET_USER --noclear %I \$TERM
 EOF
+
 systemctl daemon-reload
 
 # ── 7. .bash_profile slideshow exec ─────────────────────────────────────────
@@ -309,6 +310,19 @@ $MEMORY_LIMITS
 [Install]
 WantedBy=multi-user.target
 EOF
+# ── Hide the console cursor on the slideshow display ──────────────
+# The framebuffer viewer leaves the tty1 text cursor blinking over the
+# photos. Hide it at boot via the kernel cmdline. Idempotent; handles
+# both the Bookworm (/boot/firmware) and legacy (/boot) cmdline paths.
+CMDLINE=""
+for f in /boot/firmware/cmdline.txt /boot/cmdline.txt; do
+    [ -f "$f" ] && { CMDLINE="$f"; break; }
+done
+if [ -n "$CMDLINE" ] && ! grep -q "vt.global_cursor_default=0" "$CMDLINE"; then
+    sed -i 's/$/ vt.global_cursor_default=0/' "$CMDLINE"
+    echo "Added cursor-hide to $CMDLINE (takes effect after reboot)"
+fi
+
 systemctl daemon-reload
 systemctl enable papaframe-server.service >/dev/null
 
