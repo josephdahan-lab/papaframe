@@ -238,8 +238,13 @@ filter_missing() {
         before=$(wc -l < "$LIVE_LIST")
         after=$(wc -l < "$tmp")
         cat "$tmp" > "$LIVE_LIST"
-        # Keep SOURCE_FILE in sync so the next shuffle doesn't reintroduce gone files.
-        [ -f "$SOURCE_FILE" ] && cat "$tmp" > "$SOURCE_FILE"
+        # Keep SOURCE_FILE in sync so the next shuffle doesn't reintroduce
+        # gone files — but ONLY when no filter is active.  When a year or
+        # location filter is set, LIVE_LIST is a subset; writing it back to
+        # SOURCE_FILE would permanently discard every other year.
+        if [ ! -f "$YEAR_FILTER" ] && [ ! -f "$LOCATION_FILTER" ]; then
+            [ -f "$SOURCE_FILE" ] && cat "$tmp" > "$SOURCE_FILE"
+        fi
         echo "Filtered missing photos: $before → $after"
     fi
     rm -f "$tmp"

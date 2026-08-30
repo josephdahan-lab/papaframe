@@ -322,6 +322,7 @@ LOCATION_FILTER = Path('/tmp/frame_location_filter.txt')
 FILTERED_LIST   = Path('/tmp/frame_filtered_list.txt')
 SLIDESHOW_STATE = Path('/tmp/frame_slideshow_state.json')
 SCHEDULE_OFF_FLAG = Path('/tmp/frame_schedule_off')
+USER_STOP_FLAG    = Path("/tmp/frame_user_stopped")
 
 # Persistent location cache: one line per photo, "<path>\t<cc>".
 # "cc" is an ISO-3166-1 alpha-2 country code, or "-" for no GPS / unknown.
@@ -704,8 +705,11 @@ def _save_location_cache(cache):
     except Exception as e:
         logger.error(f'Failed to save location cache: {e}')
 
+CC_OVERRIDES = {'PS': 'IL'}
+
 def country_name(cc):
     """Best-effort ISO alpha-2 → human name, falling back to the code."""
+    cc = CC_OVERRIDES.get(cc, cc)
     if cc == NO_LOC:
         return 'No Location'
     if _pycountry:
@@ -726,7 +730,8 @@ def _refresh_location_state(cache):
     360 k-photo library."""
     counts = {}
     for cc in cache.values():
-        counts[cc] = counts.get(cc, 0) + 1
+        mapped = CC_OVERRIDES.get(cc, cc)
+        counts[mapped] = counts.get(mapped, 0) + 1
     state['location_counts'] = counts
     # location_paths deliberately NOT kept in memory — see
     # _load_paths_for_cc() for the on-demand reader.
@@ -737,6 +742,10 @@ def _load_paths_for_cc(cc):
     """Read paths for a single country code from the on-disk cache.
     Returns a list of path strings.  Reads the file sequentially so
     peak memory is one line at a time — not 360 k strings."""
+    match_codes = {cc}
+    for raw, mapped in CC_OVERRIDES.items():
+        if mapped == cc:
+            match_codes.add(raw)
     paths = []
     if not LOCATION_CACHE.exists():
         return paths
@@ -747,7 +756,7 @@ def _load_paths_for_cc(cc):
                 if not line:
                     continue
                 path, _, file_cc = line.rpartition('\t')
-                if file_cc == cc:
+                if file_cc in match_codes:
                     paths.append(path)
     except Exception as e:
         logger.error(f'Failed to read paths for {cc}: {e}')
@@ -1208,6 +1217,7 @@ def _set_screen(want):
 def _launch_frame_script():
     """Spawn start_frame.sh in a fresh session (used to resume after a scheduled pause)."""
     STOP_FLAG.unlink(missing_ok=True)
+    USER_STOP_FLAG.unlink(missing_ok=True)
     try:
         subprocess.Popen(
             ['bash', str(FRAME_SCRIPT)],
@@ -1855,6 +1865,7 @@ def api_start():
     _write_file(DURATION_FILE, duration)
     # Clear any leftover stop flag
     STOP_FLAG.unlink(missing_ok=True)
+    USER_STOP_FLAG.unlink(missing_ok=True)
 
     # Check if the bash script is already running
     if get_frame_script_pid():
@@ -1881,6 +1892,7 @@ def api_stop():
         return jsonify({'error': 'Slideshow not running'}), 400
 
     _write_file(STOP_FLAG, '1')
+    _write_file(USER_STOP_FLAG, "1")
     logger.info('Stop flag written')
     return jsonify({'success': True})
 
@@ -1906,6 +1918,7 @@ def api_restart():
 
     # If the bash script isn't running, launch it
     if not get_frame_script_pid():
+        USER_STOP_FLAG.unlink(missing_ok=True)
         STOP_FLAG.unlink(missing_ok=True)
         try:
             subprocess.Popen(
@@ -2353,6 +2366,97 @@ def api_clearsession():
             pass
     logger.info('Session cleared, GPS cache flushed, fbi killed to trigger reshuffle')
     return jsonify({'success': True})
+
+# ── API: Photo Sync ────────────────────────────────────────────────
+SYNC_CONFIG_FILE = Path(__file__).parent / 'sync_config.json'
+SYNC_LOG_FILE    = Path(__file__).parent / 'sync_log.json'
+SYNC_SCRIPT      = Path(__file__).parent / 'scripts' / 'photo_sync.py'
+_sync_lock       = threading.Lock()
+_sync_running    = False
+
+def _load_sync_config():
+    if not SYNC_CONFIG_FILE.exists():
+        return []
+    try:
+        with open(SYNC_CONFIG_FILE) as f:
+            return json.load(f).get('folders', [])
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+def _save_sync_config(folders):
+    tmp = SYNC_CONFIG_FILE.with_suffix('.tmp')
+    with open(tmp, 'w') as f:
+        json.dump({'folders': folders}, f, indent=2)
+    tmp.replace(SYNC_CONFIG_FILE)
+
+def _load_sync_log():
+    if not SYNC_LOG_FILE.exists():
+        return []
+    try:
+        with open(SYNC_LOG_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+@app.route('/api/sync/config', methods=['GET'])
+def api_sync_config_get():
+    return jsonify({'folders': _load_sync_config()})
+
+@app.route('/api/sync/config', methods=['POST'])
+def api_sync_config_set():
+    data = request.json or {}
+    folders = data.get('folders', [])
+    cleaned = []
+    for f in folders:
+        src = f.get('source', '').strip()
+        dst = f.get('destination', '').strip()
+        if src and dst:
+            cleaned.append({'source': src, 'destination': dst})
+    _save_sync_config(cleaned)
+    logger.info(f'Sync config updated: {len(cleaned)} folder pair(s)')
+    return jsonify({'success': True, 'count': len(cleaned)})
+
+@app.route('/api/sync/log', methods=['GET'])
+def api_sync_log():
+    entries = _load_sync_log()
+    entries.reverse()
+    limit = request.args.get('limit', type=int)
+    if limit and limit > 0:
+        entries = entries[:limit]
+    return jsonify({'entries': entries, 'total': len(_load_sync_log())})
+
+@app.route('/api/sync/run', methods=['POST'])
+def api_sync_run():
+    global _sync_running
+    if _sync_running:
+        return jsonify({'error': 'Sync already in progress'}), 409
+
+    def _run_sync():
+        global _sync_running
+        try:
+            _sync_running = True
+            logger.info('Manual photo sync started')
+            subprocess.run(
+                [sys.executable, str(SYNC_SCRIPT)],
+                timeout=3600,
+            )
+            logger.info('Manual photo sync completed')
+        except Exception as e:
+            logger.error(f'Photo sync failed: {e}')
+        finally:
+            _sync_running = False
+
+    with _sync_lock:
+        if _sync_running:
+            return jsonify({'error': 'Sync already in progress'}), 409
+        t = threading.Thread(target=_run_sync, daemon=True)
+        t.start()
+
+    return jsonify({'success': True, 'message': 'Sync started in background'})
+
+@app.route('/api/sync/status', methods=['GET'])
+def api_sync_status():
+    return jsonify({'running': _sync_running})
 
 # ── Entry point ────────────────────────────────────────────────────
 if __name__ == '__main__':

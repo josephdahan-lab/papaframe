@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PapaFrame</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="style.css?v=1.0.3">
+  <link rel="stylesheet" href="style.css?v=2.0.0">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -274,6 +274,17 @@
             <span class="fact-val" id="fact-uptime2">—</span>
             <span class="fact-desc">server uptime</span>
           </div>
+        </div>
+      </div>
+
+      <!-- Latest Changes (Photo Sync) -->
+      <div class="card">
+        <div class="section-title">Latest Changes</div>
+        <div id="sync-summary" style="font-size:.85rem;opacity:.75;margin-bottom:.5rem;">Loading…</div>
+        <div id="sync-log-list" class="sync-log-list" style="max-height:220px;overflow-y:auto;font-size:.82rem;"></div>
+        <div style="margin-top:.6rem;display:flex;gap:.5rem;align-items:center;">
+          <button id="sync-now-btn" class="btn-secondary" style="font-size:.82rem;padding:.35rem .7rem;">▶ Sync now</button>
+          <span id="sync-running-indicator" style="font-size:.8rem;color:var(--primary,#4fc3f7);display:none;">Syncing…</span>
         </div>
       </div>
 
@@ -1452,6 +1463,94 @@ window.addEventListener('load', () => {
     await fetchLocations();
     if (_locReady) clearInterval(locPoll);
   }, 10000);
+
+  // ── Sync log (Latest Changes) ─────────────────────────────────
+  const syncLogList = document.getElementById('sync-log-list');
+  const syncSummary = document.getElementById('sync-summary');
+  const syncNowBtn  = document.getElementById('sync-now-btn');
+  const syncRunInd  = document.getElementById('sync-running-indicator');
+
+  function fmtSyncDate(iso) {
+    const d = new Date(iso);
+    const now = new Date();
+    const diff = now - d;
+    if (diff < 86400000) {
+      const h = Math.floor(diff / 3600000);
+      if (h < 1) return Math.floor(diff / 60000) + 'm ago';
+      return h + 'h ago';
+    }
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
+  async function fetchSyncLog() {
+    try {
+      const res = await fetch('/api/sync/log?limit=50');
+      const data = await res.json();
+      const entries = data.entries || [];
+      const synced = entries.filter(e => e.action === 'synced');
+      const errors = entries.filter(e => e.action === 'error');
+
+      if (entries.length === 0) {
+        syncSummary.textContent = 'No sync activity yet.';
+        syncLogList.innerHTML = '';
+        return;
+      }
+
+      const last = new Date(entries[0].timestamp);
+      syncSummary.textContent = `Last sync: ${last.toLocaleString()} · ${data.total} total entries`;
+
+      const html = entries.slice(0, 30).map(e => {
+        const icon = e.action === 'synced' ? '✓' : '✕';
+        const cls = e.action === 'synced' ? 'color:#16a34a' : 'color:#dc2626';
+        const name = e.filename || '?';
+        const folder = e.folder || '';
+        const time = fmtSyncDate(e.timestamp);
+        const size = e.new_size ? ` (${e.new_size})` : '';
+        return `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--border,#eee);">
+          <span><span style="${cls};font-weight:600;margin-right:4px;">${icon}</span>${folder}/${name}${size}</span>
+          <span style="opacity:.6;white-space:nowrap;margin-left:8px;">${time}</span>
+        </div>`;
+      }).join('');
+      syncLogList.innerHTML = html;
+    } catch (e) {
+      syncSummary.textContent = 'Could not load sync log.';
+    }
+  }
+
+  async function triggerSync() {
+    syncNowBtn.disabled = true;
+    syncRunInd.style.display = '';
+    try {
+      const res = await fetch('/api/sync/run', { method: 'POST' });
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.error || 'failed');
+      }
+      const poll = setInterval(async () => {
+        try {
+          const sr = await fetch('/api/sync/status');
+          const sd = await sr.json();
+          if (!sd.running) {
+            clearInterval(poll);
+            syncNowBtn.disabled = false;
+            syncRunInd.style.display = 'none';
+            fetchSyncLog();
+          }
+        } catch (_) {
+          clearInterval(poll);
+          syncNowBtn.disabled = false;
+          syncRunInd.style.display = 'none';
+        }
+      }, 3000);
+    } catch (e) {
+      syncNowBtn.disabled = false;
+      syncRunInd.style.display = 'none';
+    }
+  }
+
+  syncNowBtn.addEventListener('click', triggerSync);
+  fetchSyncLog();
+  setInterval(fetchSyncLog, 120000);
 });
 </script>
 </body>

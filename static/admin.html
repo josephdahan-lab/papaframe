@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PapaFrame — Admin</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="style.css?v=1.0.3">
+  <link rel="stylesheet" href="style.css?v=2.0.0">
   <style>
     .admin-wrap { max-width: 760px; margin: 0 auto; padding: 1.5rem; }
     .admin-wrap h1 { margin-bottom: .25rem; }
@@ -71,6 +71,39 @@
     }
     .cache-slider-meta .warn { color: #b45309; font-weight: 600; }
     html.dark .cache-slider-meta .warn { color: #fbbf24; }
+
+    /* Sync folders section */
+    .sync-section { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border, #ddd); }
+    .sync-section h2 { margin-bottom: .25rem; }
+    .sync-section .sub { font-size: .9rem; opacity: .75; margin-bottom: 1rem; }
+    .sync-pair {
+      display: flex; gap: .5rem; align-items: center;
+      margin-bottom: .5rem; flex-wrap: wrap;
+    }
+    .sync-pair input[type=text] {
+      flex: 1; min-width: 180px; padding: .5rem .6rem;
+      border: 1px solid var(--border, #bbb);
+      border-radius: 8px; font-size: .9rem;
+      font-family: ui-monospace, Menlo, monospace;
+      background: var(--card-bg, #fff);
+      color: inherit;
+    }
+    .sync-pair .arrow { font-size: 1.1rem; opacity: .5; flex-shrink: 0; }
+    .sync-pair .btn-remove {
+      background: none; border: none; color: #dc2626; cursor: pointer;
+      font-size: 1.2rem; padding: .2rem .4rem; border-radius: 6px;
+      flex-shrink: 0;
+    }
+    .sync-pair .btn-remove:hover { background: #fee2e2; }
+    html.dark .sync-pair .btn-remove:hover { background: #7f1d1d55; }
+    #sync-add-btn {
+      font-size: .9rem; padding: .45rem .9rem; margin-top: .25rem;
+      cursor: pointer; border-radius: 8px;
+      border: 1px dashed var(--border, #bbb);
+      background: transparent; color: inherit; opacity: .8;
+    }
+    #sync-add-btn:hover { opacity: 1; background: var(--card-bg, #f8f8f8); }
+    #sync-status-banner { margin-top: .75rem; }
   </style>
 </head>
 <body>
@@ -100,6 +133,20 @@
       <button type="button" id="rebuild-btn" class="btn-restart">🔁 Rebuild photo list</button>
     </div>
   </form>
+
+  <!-- Sync Folders -->
+  <div class="sync-section">
+    <h2>Photo Sync Folders</h2>
+    <p class="sub">Sync photos from NAS source folders to local USB destinations.
+      New photos are resized to 1920x1080 and saved as JPEG. Subfolders are included automatically.</p>
+    <div id="sync-pairs"></div>
+    <button type="button" id="sync-add-btn">+ Add folder pair</button>
+    <div class="action-row">
+      <button type="button" id="sync-save-btn" class="btn-start">💾 Save sync folders</button>
+      <button type="button" id="sync-run-btn" class="btn-restart">▶ Sync now</button>
+    </div>
+    <div id="sync-status-banner"></div>
+  </div>
 </div>
 
 <script>
@@ -283,7 +330,110 @@ form.addEventListener('submit', saveConfig);
 reloadBtn.addEventListener('click', loadConfig);
 rebuildBtn.addEventListener('click', rebuildPhotoList);
 
+// ── Sync folders ──────────────────────────────────────────────────
+const syncPairsEl    = document.getElementById('sync-pairs');
+const syncAddBtn     = document.getElementById('sync-add-btn');
+const syncSaveBtn    = document.getElementById('sync-save-btn');
+const syncRunBtn     = document.getElementById('sync-run-btn');
+const syncBanner     = document.getElementById('sync-status-banner');
+
+function showSyncBanner(msg, kind = 'info') {
+  syncBanner.innerHTML = `<div class="banner ${kind}">${msg}</div>`;
+  if (kind === 'success') setTimeout(() => syncBanner.innerHTML = '', 4000);
+}
+
+function addSyncPairRow(src = '', dst = '') {
+  const row = document.createElement('div');
+  row.className = 'sync-pair';
+  row.innerHTML = `
+    <input type="text" placeholder="/mnt/nas/Pictures/..." value="${esc(src)}" class="sync-src">
+    <span class="arrow">→</span>
+    <input type="text" placeholder="/mnt/usb/Pictures/..." value="${esc(dst)}" class="sync-dst">
+    <button type="button" class="btn-remove" title="Remove this pair">✕</button>
+  `;
+  row.querySelector('.btn-remove').addEventListener('click', () => row.remove());
+  syncPairsEl.appendChild(row);
+}
+
+async function loadSyncConfig() {
+  try {
+    const res = await fetch('/api/sync/config');
+    const data = await res.json();
+    syncPairsEl.innerHTML = '';
+    const folders = data.folders || [];
+    if (folders.length === 0) {
+      addSyncPairRow();
+    } else {
+      folders.forEach(f => addSyncPairRow(f.source, f.destination));
+    }
+  } catch (e) {
+    showSyncBanner('Failed to load sync config: ' + e.message, 'error');
+  }
+}
+
+async function saveSyncConfig() {
+  const rows = syncPairsEl.querySelectorAll('.sync-pair');
+  const folders = [];
+  rows.forEach(row => {
+    const src = row.querySelector('.sync-src').value.trim();
+    const dst = row.querySelector('.sync-dst').value.trim();
+    if (src && dst) folders.push({ source: src, destination: dst });
+  });
+  try {
+    const res = await fetch('/api/sync/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folders }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'save failed');
+    showSyncBanner(`Saved ${data.count} sync folder pair(s).`, 'success');
+  } catch (e) {
+    showSyncBanner('Save failed: ' + e.message, 'error');
+  }
+}
+
+async function runSync() {
+  syncRunBtn.disabled = true;
+  syncRunBtn.textContent = '⏳ Syncing…';
+  try {
+    const res = await fetch('/api/sync/run', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'sync failed');
+    showSyncBanner('Sync started in background. Check the dashboard for progress.', 'info');
+    pollSyncStatus();
+  } catch (e) {
+    showSyncBanner('Sync failed: ' + e.message, 'error');
+    syncRunBtn.disabled = false;
+    syncRunBtn.textContent = '▶ Sync now';
+  }
+}
+
+async function pollSyncStatus() {
+  const poll = setInterval(async () => {
+    try {
+      const res = await fetch('/api/sync/status');
+      const data = await res.json();
+      if (!data.running) {
+        clearInterval(poll);
+        syncRunBtn.disabled = false;
+        syncRunBtn.textContent = '▶ Sync now';
+        showSyncBanner('Sync completed.', 'success');
+      }
+    } catch (e) {
+      clearInterval(poll);
+      syncRunBtn.disabled = false;
+      syncRunBtn.textContent = '▶ Sync now';
+    }
+  }, 3000);
+}
+
+syncAddBtn.addEventListener('click', () => addSyncPairRow());
+syncSaveBtn.addEventListener('click', saveSyncConfig);
+syncRunBtn.addEventListener('click', runSync);
+
 loadConfig();
+loadSyncConfig();
 </script>
 </body>
 </html>

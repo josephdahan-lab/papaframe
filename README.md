@@ -4,8 +4,8 @@ A Linux-based digital picture frame that turns a Raspberry Pi (or any Linux box
 with a display) into a network-controllable slideshow. A small bash runner
 drives the slideshow directly on the framebuffer — no desktop environment
 required — while a Flask web server gives you a phone-friendly dashboard for
-start/stop, duration, filtering by year or country, EXIF/GPS inspection, and
-scheduled screen on/off.
+start/stop, duration, filtering by year or country, EXIF/GPS inspection,
+photo sync from NAS, and scheduled screen on/off.
 
 ```
    ┌──────────────────┐         ┌──────────────────────┐
@@ -18,6 +18,12 @@ scheduled screen on/off.
                                      │  server.py  │ ◄── HTTP from your phone
                                      │   (Flask)   │
                                      └─────────────┘
+                                           ▲
+                                           │ triggers
+                                     ┌─────┴───────────┐
+                                     │ photo_sync.py    │ ◄── cron (3 AM daily)
+                                     │ NAS → USB resize │
+                                     └─────────────────┘
 ```
 
 Both processes share a single config file — `config.sh` — which the web admin
@@ -49,6 +55,18 @@ page can edit in place.
 - Year filter (`/2017/`-style path matching) and country filter (reverse-
   geocoded from photo GPS).
 
+**Photo Sync (v2.0)**
+- Automatic daily sync from a NAS (or any mounted source) to local USB storage.
+- Configurable folder pairs — map any source directory to any destination.
+- Images are resized to fit 1920×1080 (preserving aspect ratio, never
+  upscaling) and saved as optimized JPEG (quality 85).
+- Non-image files and videos are skipped automatically.
+- Incremental mode: only files newer than the last run are processed.
+  Use `--full` flag for a complete rescan.
+- Fallback copy for files Pillow cannot decode (malformed JPEG headers, etc.).
+- Sync log with 1-year retention, flushed every 25 files for live progress.
+- Runs via cron at 3 AM daily, or on demand from the dashboard.
+
 **Web UI (`server.py`, Flask)**
 - Mobile-friendly dashboard at `/` and admin page at `/admin`.
 - Start / stop / restart the slideshow.
@@ -56,8 +74,11 @@ page can edit in place.
 - Inspect the current photo: EXIF, GPS, resolved country.
 - Thumbnail endpoint backed by Pillow.
 - Year and country pickers backed by indexes built from your library.
+- **Latest Changes** card showing recent sync activity with live progress.
 - Daily on/off schedule (DPMS) — great for "lights out" at night.
 - Edit `config.sh` from the admin page (comments preserved).
+- **Sync folder configuration** on the admin page — add, remove, and
+  reorder source/destination pairs without touching config files.
 
 **Stats**
 - Session view tracks photos shown since the last start.
@@ -126,6 +147,27 @@ the slideshow — `start_frame.sh` does a parallel `stat` over the photo list
 and will quietly tolerate missing files, but a totally-down mount means an
 empty list.
 
+### Setting up Photo Sync
+
+1. Mount your NAS and USB storage (e.g. via `/etc/fstab`).
+2. Configure folder pairs on the admin page (`/admin` → **Photo Sync Folders**)
+   or edit `sync_config.json` directly:
+   ```json
+   {
+     "folders": [
+       {"source": "/mnt/nas/Pictures/Joseph", "destination": "/mnt/usb/Pictures/Joseph"},
+       {"source": "/mnt/nas/Pictures/Tricia", "destination": "/mnt/usb/Pictures/Tricia"}
+     ]
+   }
+   ```
+3. Add a cron job for daily sync:
+   ```bash
+   crontab -e
+   # Add:
+   0 3 * * * PYTHONUNBUFFERED=1 /path/to/papaframe/.venv/bin/python3 /path/to/papaframe/scripts/photo_sync.py >> /path/to/papaframe/sync.log 2>&1
+   ```
+4. The **Latest Changes** card on the dashboard shows sync progress and history.
+
 ---
 
 ## Configuration
@@ -171,7 +213,14 @@ store is a NAS that goes offline, the slideshow keeps running from the cache.
 The **Photo Cache** card on the dashboard shows usage and has a *Fill cache
 now* button; cache settings are also editable on the `/admin` page.
 
-### Two ways to edit it
+### Sync configuration
+
+Sync folder pairs are stored in `sync_config.json` and can be managed from
+the admin page (**Photo Sync Folders** section). Each pair maps a source
+directory (typically on a NAS mount) to a destination directory (typically on
+local/USB storage). Subdirectories are included recursively.
+
+### Two ways to edit config.sh
 
 **1. From the web admin page (routine tweaks)** — open
 `http://<frame-ip>:8000/admin`, change values, **Save config**. The values are
@@ -186,7 +235,7 @@ $EDITOR config.sh
 ### After editing
 
 - Restart the server for any change to take effect.
-- If you changed `PHOTO_DIRS`, click **🔁 Rebuild photo list** on the admin
+- If you changed `PHOTO_DIRS`, click **Rebuild photo list** on the admin
   page (or delete `SOURCE_FILE`) so the master list is regenerated.
 - If you changed `SERVER_PORT`, point your browser at the new port.
 
@@ -273,8 +322,8 @@ sudo systemctl enable --now papaframe-slideshow papaframe-server
 
 | Page         | What's there                                                              |
 | ------------ | ------------------------------------------------------------------------- |
-| `/`          | Live status, current photo + EXIF/GPS, start/stop, duration slider, year and country pickers, schedule controls. |
-| `/admin`     | Full `config.sh` editor with inline help, plus a **Rebuild photo list** button. |
+| `/`          | Live status, current photo + EXIF/GPS, start/stop, duration slider, year and country pickers, schedule controls, **Latest Changes** sync log. |
+| `/admin`     | Full `config.sh` editor with inline help, **Photo Sync Folders** config, and a **Rebuild photo list** button. |
 
 ### HTTP API
 
@@ -320,6 +369,13 @@ script against.
 - `GET  /api/cache/status` — enabled flag, size budget, usage, photo count.
 - `POST /api/cache/fill` — trigger a cache fill now (runs in the background).
 
+**Photo Sync (v2.0)**
+- `GET  /api/sync/config` — current sync folder pairs.
+- `POST /api/sync/config` — save sync folder pairs (`{ "folders": [...] }`).
+- `GET  /api/sync/log?limit=N` — recent sync log entries (newest first).
+- `POST /api/sync/run` — trigger a sync now (runs in background).
+- `GET  /api/sync/status` — whether a sync is currently running.
+
 **Stats**
 - `GET  /api/stats`
 - `GET  /api/sessionpoints`
@@ -331,24 +387,52 @@ script against.
 
 ```
 papaframe/
-├── server.py              ← Flask web server + admin API
+├── server.py              ← Flask web server + admin API + sync API
 ├── config.sh              ← single source of truth for all settings
+├── sync_config.json       ← sync folder pair mappings (editable from admin)
+├── version.py             ← version string
 ├── requirements.txt
 ├── static/
-│   ├── index.html         ← main dashboard
-│   ├── admin.html         ← /admin page
+│   ├── index.html         ← main dashboard (includes Latest Changes card)
+│   ├── admin.html         ← /admin page (includes Photo Sync Folders config)
 │   ├── style.css
 │   └── favicon.svg
 └── scripts/
     ├── start_frame.sh     ← slideshow launcher (sources config.sh)
+    ├── photo_sync.py      ← NAS-to-USB photo sync with resize
     ├── papaframe-screen   ← root helper for HDMI on/off (installed to /usr/local/bin)
     └── install.sh         ← Pi installer (apt deps, venv, autologin, systemd unit)
 ```
 
 State files written at runtime live under `/tmp/` (slideshow flags, the
 filtered live list, the slideshow state JSON) and next to `server.py`
-(`frame_display.log`, the year/location index caches, and the `cache/`
-folder holding cached photos + `manifest.tsv`).
+(`frame_display.log`, the year/location index caches, `sync_log.json`,
+and the `cache/` folder holding cached photos + `manifest.tsv`).
+
+---
+
+## Changelog
+
+### v2.0.0
+
+- **Photo sync**: automatic daily sync from NAS to USB with image resize
+  (1920×1080, JPEG quality 85). Configurable folder pairs, incremental
+  mode, fallback copy for unreadable files.
+- **Admin sync config**: add/remove unlimited source→destination folder
+  pairs from the admin page — no file editing required.
+- **Latest Changes dashboard card**: live sync progress, recent sync
+  history, and a "Sync Now" button on the main dashboard.
+- **Location filter fix**: corrected reverse-geocoder country code mapping
+  for Israel (was incorrectly showing as "State of Palestine" for some
+  GPS coordinates).
+- **Year filter bug fix**: fixed a bug where applying a year filter would
+  permanently truncate the master photo list, making it impossible to
+  return to "All Years" without a manual rebuild.
+
+### v1.0.5
+
+- Initial public release with slideshow, web UI, photo cache, year/country
+  filters, EXIF/GPS inspection, and DPMS schedule.
 
 ---
 
@@ -362,13 +446,20 @@ folder holding cached photos + `manifest.tsv`).
   `sudo systemctl disable --now lightdm`.
 - **Admin page won't save** — check `frame_display.log`; the server user
   needs write access to `config.sh`.
-- **New photos don't appear** — click **🔁 Rebuild photo list** on the admin
+- **New photos don't appear** — click **Rebuild photo list** on the admin
   page, then restart the slideshow.
 - **Empty slideshow over SMB/NFS** — the live-list filter drops missing
   paths; if the mount is fully down it'll keep the stale list rather than
   blank the screen, but verify the share is mounted before debugging further.
 - **"Loading FAILED" briefly visible** — `fbi` prints that itself when a
   file isn't readable. Run a manual rebuild after large library changes.
+- **Sync errors in the log** — check that both NAS and USB mounts are
+  accessible and that the user running the cron job has write permissions
+  to the destination directories. Verify mount ownership in `/etc/fstab`
+  matches the user's UID/GID.
+- **Year filter stuck on one year** — this was a bug fixed in v2.0.0. If
+  the master photo list (`photo_list.txt`) looks truncated, delete it and
+  click **Rebuild photo list** on the admin page.
 
 ---
 

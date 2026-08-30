@@ -1,3 +1,3 @@
 """Single source of truth for the PapaFrame version number."""
 
-__version__ = '1.0.5'
+__version__ = '2.0.0'

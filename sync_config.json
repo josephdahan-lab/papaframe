@@ -1,0 +1,16 @@
+{
+  "folders": [
+    {
+      "source": "/mnt/nas/Pictures/Joseph",
+      "destination": "/mnt/usb/Pictures/Joseph"
+    },
+    {
+      "source": "/mnt/nas/Pictures/Tricia",
+      "destination": "/mnt/usb/Pictures/Tricia"
+    },
+    {
+      "source": "/mnt/nas/Pictures/Scans",
+      "destination": "/mnt/usb/Pictures/Scans-small"
+    }
+  ]
+}
