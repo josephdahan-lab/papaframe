@@ -122,3 +122,7 @@ FRAME_SCRIPT="scripts/start_frame.sh"
 # Server log file.
 LOG_FILE="frame_display.log"
 
+# Rotate the server log at this size (MB), keeping this many old copies.
+LOG_MAX_MB=10
+LOG_BACKUPS=3
+

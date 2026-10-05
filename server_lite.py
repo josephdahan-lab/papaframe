@@ -11,6 +11,7 @@ import gc
 import hashlib
 import json
 import logging
+import logging.handlers
 import os
 import re
 import signal
@@ -70,6 +71,10 @@ CONFIG_SCHEMA = [
      'Path to start_frame.sh — the bash script that runs the viewer.'),
     ('LOG_FILE',          'str', 'Server log file',
      'Log output path (relative to server.py if not absolute).'),
+    ('LOG_MAX_MB',        'int', 'Log file size limit (MB)',
+     'The server log is rotated when it reaches this size.'),
+    ('LOG_BACKUPS',       'int', 'Rotated logs to keep',
+     'Number of old log files kept (frame_display.log.1, .2, ...).'),
     ('CACHE_SIZE_MB',     'int', 'Photo cache size (MB)',
      'Local cache budget in megabytes. 0 disables the cache.'),
     ('CACHE_COMPRESS',    'bool', 'Compress cached photos',
@@ -155,7 +160,13 @@ def _detect_low_resource():
 LOW_RESOURCE, LOW_RESOURCE_REASON = _detect_low_resource()
 
 # ── Setup ─────────────────────────────────────────────────────────
-logging.basicConfig(filename=_cfg('LOG_FILE', 'frame_display.log'),
+# Rotate the log so it can't fill the SD card: LOG_MAX_MB per file,
+# LOG_BACKUPS old copies kept (frame_display.log.1, .2, ...).
+_log_handler = logging.handlers.RotatingFileHandler(
+    _cfg('LOG_FILE', 'frame_display.log'),
+    maxBytes=max(1, _cfg_int('LOG_MAX_MB', 10)) * 1024 * 1024,
+    backupCount=max(1, _cfg_int('LOG_BACKUPS', 3)))
+logging.basicConfig(handlers=[_log_handler],
                     level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
