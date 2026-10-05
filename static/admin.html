@@ -584,7 +584,8 @@ async function loadPreview() {
       <div class="pp-stats">
         <span>On source: <b>${fmtNum(p.source_photos)}</b></span>
         <span>On frame: <b>${fmtNum(p.frame_photos)}</b></span>
-        <span>To download: <b>${fmtNum(p.to_copy)}</b> (${fmtBytes(p.to_copy_bytes || 0)} before resizing)</span>
+        <span>To download: <b>${fmtNum(p.to_copy)}</b> (${fmtBytes(p.to_copy_bytes || 0)} before resizing${
+          p.empty_on_frame ? `, incl. ${fmtNum(p.empty_on_frame)} empty copies to redo` : ''})</span>
         <span>No longer on source: <b>${fmtNum(p.to_trash)}</b></span>
       </div>
       ${skipped ? `<div style="opacity:.7;font-size:.82rem">Not photos, skipped: ${skipped}</div>` : ''}

@@ -14,7 +14,8 @@ timestamp:
     and recorded in sync_trash.json. Nothing is deleted here; the admin page
     lists trashed photos so they can be deleted for good or restored.
   * on both → the copy's modification time is set to the source's if they
-    differ (older syncs stamped copies with the time of the sync).
+    differ (older syncs stamped copies with the time of the sync). A copy
+    that is 0 bytes (left by a failed sync) is copied again.
 
 Files are matched by relative path without extension, case-insensitively:
 source "2023/IMG_1.HEIC" is the frame's "2023/IMG_1.jpg".
@@ -212,9 +213,12 @@ def diff_pair(source, destination):
         result['error'] = f'cannot read destination: {e}'
         return result
 
-    to_copy = sorted(src[k][0] for k in src.keys() - dst.keys())
+    both = src.keys() & dst.keys()
+    # 0-byte copies are left-overs from failed syncs: copy them again.
+    empty = {k for k in both if dst[k][2] == 0 and src[k][2] > 0}
+    to_copy = sorted(src[k][0] for k in (src.keys() - dst.keys()) | empty)
     orphans = sorted(dst[k][0] for k in dst.keys() - src.keys())
-    retime = [(dst[k][0], src[k][1]) for k in src.keys() & dst.keys()
+    retime = [(dst[k][0], src[k][1]) for k in both - empty
               if abs(dst[k][1] - src[k][1]) > 2]
     unsupported = {e: n for e, n in skipped.items() if e in ('.heic', '.heif')}
 
@@ -225,6 +229,8 @@ def diff_pair(source, destination):
         'to_copy': len(to_copy),
         'to_copy_bytes': sum(src[match_key(r)][2] for r in to_copy),
         'to_copy_list': to_copy,
+        'empty_on_frame': len(empty),
+        'empty_list': sorted(dst[k][0] for k in empty),
         'to_trash': len(orphans),
         'to_trash_list': orphans,
         'trash_blocked': len(orphans) > limit,
@@ -310,6 +316,16 @@ def apply_pair(diff, settings, log_entries, trash_entries):
         pending += 1
         flush()
 
+    # A 0-byte left-over saved under another extension (e.g. x.png when the
+    # new copy is x.jpg) would shadow the good copy — remove it.
+    for rel in diff.get('empty_list', []):
+        stale = destination / rel
+        try:
+            if stale.suffix.lower() != '.jpg' and stale.stat().st_size == 0:
+                stale.unlink()
+        except OSError:
+            pass
+
     for rel, mtime in diff['retime_list']:
         try:
             os.utime(destination / rel, (mtime, mtime))
@@ -367,7 +383,8 @@ def _prune_empty_dirs(root, rels):
 
 def _strip_lists(diff):
     """Preview/report form of a diff: capped sample lists, no internals."""
-    out = {k: v for k, v in diff.items() if k not in ('to_copy_list', 'to_trash_list', 'retime_list')}
+    out = {k: v for k, v in diff.items()
+           if k not in ('to_copy_list', 'to_trash_list', 'retime_list', 'empty_list')}
     if 'error' not in diff:
         out['to_copy_list'] = diff['to_copy_list'][:SAMPLE_LIMIT]
         out['to_trash_list'] = diff['to_trash_list'][:SAMPLE_LIMIT]

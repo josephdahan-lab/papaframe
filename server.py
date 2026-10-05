@@ -755,9 +755,12 @@ def rebuild_photo_library():
                         if '\n' in p or '\t' in p:
                             continue
                         try:
-                            mtime = os.stat(p).st_mtime
+                            st = os.stat(p)
                         except OSError:
                             continue
+                        if st.st_size == 0:     # damaged / failed copy
+                            continue
+                        mtime = st.st_mtime
                         fl.write(p + '\n')
                         fd.write(f'{p}\t{_photo_date(p, mtime)}\n')
                         count += 1
