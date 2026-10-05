@@ -413,6 +413,13 @@ and the `cache/` folder holding cached photos + `manifest.tsv`).
 
 ## Changelog
 
+### v2.0.1
+
+- **Log rotation**: `frame_display.log` is now rotated at `LOG_MAX_MB`
+  (default 10 MB) with `LOG_BACKUPS` old copies kept (default 3), so the
+  server log can no longer grow without bound and fill the SD card. Both
+  settings are editable from the admin page.
+
 ### v2.0.0
 
 - **Photo sync**: automatic daily sync from NAS to USB with image resize
