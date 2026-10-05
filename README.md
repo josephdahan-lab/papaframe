@@ -21,7 +21,7 @@ photo sync from NAS, and scheduled screen on/off.
                                            ▲
                                            │ triggers
                                      ┌─────┴───────────┐
-                                     │ photo_sync.py    │ ◄── cron (3 AM daily)
+                                     │ photo_sync.py    │ ◄── server scheduler (nightly)
                                      │ NAS → USB resize │
                                      └─────────────────┘
 ```
@@ -52,20 +52,27 @@ page can edit in place.
   network shares where files come and go.
 - Resume position when duration changes mid-show, so the viewer doesn't snap
   back to photo #1 every time you tweak the speed.
-- Year filter (`/2017/`-style path matching) and country filter (reverse-
+- Year filter (`/2017/`-style path matching), **Last month / Last 3 months /
+  Last 6 months** filters (by date taken), and country filter (reverse-
   geocoded from photo GPS).
 
-**Photo Sync (v2.0)**
-- Automatic daily sync from a NAS (or any mounted source) to local USB storage.
+**Photo Sync**
+- Nightly sync from a NAS (or any mounted source) to local USB storage, run by
+  the server at `SYNC_TIME`, then the photo list and all filter indexes are
+  rebuilt. Can be turned off completely from the admin page (`SYNC_ENABLED`).
 - Configurable folder pairs — map any source directory to any destination.
-- Images are resized to fit 1920×1080 (preserving aspect ratio, never
-  upscaling) and saved as optimized JPEG (quality 85).
+- Works from the difference between source and frame (no timestamp
+  guessing), so late-arriving photos are never skipped.
+- Images are resized to fit `SYNC_MAX_WIDTH`×`SYNC_MAX_HEIGHT` (default
+  1920×1080, never upscaled) and saved as JPEG (`SYNC_JPEG_QUALITY`, default
+  85), keeping EXIF date and GPS. HEIC/HEIF is supported via `pillow-heif`.
+- Photos removed from the source are moved to a trash folder, never deleted
+  automatically; the admin page lists them to delete or restore. A safety
+  limit stops a run from trashing more than 5% of a folder unless approved.
+- **Preview differences** on the admin page shows what a sync would do.
 - Non-image files and videos are skipped automatically.
-- Incremental mode: only files newer than the last run are processed.
-  Use `--full` flag for a complete rescan.
 - Fallback copy for files Pillow cannot decode (malformed JPEG headers, etc.).
 - Sync log with 1-year retention, flushed every 25 files for live progress.
-- Runs via cron at 3 AM daily, or on demand from the dashboard.
 
 **Web UI (`server.py`, Flask)**
 - Mobile-friendly dashboard at `/` and admin page at `/admin`.
@@ -150,7 +157,7 @@ empty list.
 ### Setting up Photo Sync
 
 1. Mount your NAS and USB storage (e.g. via `/etc/fstab`).
-2. Configure folder pairs on the admin page (`/admin` → **Photo Sync Folders**)
+2. Configure folder pairs on the admin page (`/admin` → **Photo Sync**)
    or edit `sync_config.json` directly:
    ```json
    {
@@ -160,12 +167,10 @@ empty list.
      ]
    }
    ```
-3. Add a cron job for daily sync:
-   ```bash
-   crontab -e
-   # Add:
-   0 3 * * * PYTHONUNBUFFERED=1 /path/to/papaframe/.venv/bin/python3 /path/to/papaframe/scripts/photo_sync.py >> /path/to/papaframe/sync.log 2>&1
-   ```
+3. Use **Preview differences** on the admin page to check what the first sync
+   will do, then **Sync now** (or wait for the nightly run at `SYNC_TIME`).
+   No cron job is needed — the server schedules it. If you set one up for an
+   older version, remove it.
 4. The **Latest Changes** card on the dashboard shows sync progress and history.
 
 ---
@@ -193,6 +198,14 @@ when moving PapaFrame to a different frame.
 | `SOURCE_FILE`        | Master photo list (regenerated when missing)         | `photo_list.txt`                   |
 | `FRAME_SCRIPT`       | Path to `start_frame.sh`                             | `scripts/start_frame.sh`           |
 | `LOG_FILE`           | Server log path (relative paths anchor at repo root) | `frame_display.log`                |
+| `LOG_MAX_MB`         | Rotate the server log at this size                   | `10`                               |
+| `LOG_BACKUPS`        | Rotated server logs to keep                          | `3`                                |
+| `SYNC_ENABLED`       | `no` turns photo sync off completely                 | `yes`                              |
+| `SYNC_TIME`          | Nightly sync time (HH:MM, 24h)                       | `03:00`                            |
+| `SYNC_MAX_WIDTH`     | Synced photos fit within this width                  | `1920`                             |
+| `SYNC_MAX_HEIGHT`    | Synced photos fit within this height                 | `1080`                             |
+| `SYNC_JPEG_QUALITY`  | JPEG quality for synced photos                       | `85`                               |
+| `SYNC_TRASH_DIR`     | Trash for photos removed from the source (empty = `.papaframe-trash` on the destination drive) | `""` |
 
 > Relative paths in `SOURCE_FILE`, `FRAME_SCRIPT`, `LOG_FILE`, and `CACHE_DIR`
 > resolve from the repo root (the directory holding `server.py`). Absolute
@@ -345,9 +358,10 @@ script against.
 - `GET  /api/photo/thumb?path=…` — JPEG thumbnail.
 
 **Filters**
-- `GET  /api/years` — `[ "2017", "2018", … ]`
-- `POST /api/setfilter` — `{ "year": "2018" }` or `{ "year": "" }` to clear.
-- `POST /api/rebuildyears`
+- `GET  /api/years` — year buckets plus `recent` ("last N months") counts.
+- `POST /api/setfilter` — `{ "year": 2018 }`, `{ "year": "last3m" }`
+  (`last1m` / `last3m` / `last6m`), or `{ "year": null }` to clear.
+- `POST /api/rebuildyears` — rescan the photo folders and rebuild the indexes.
 - `GET  /api/locations` — countries present in the library.
 - `POST /api/setlocationfilter` — `{ "country": "FR" }`
 - `POST /api/rebuildlocations`
@@ -373,8 +387,12 @@ script against.
 - `GET  /api/sync/config` — current sync folder pairs.
 - `POST /api/sync/config` — save sync folder pairs (`{ "folders": [...] }`).
 - `GET  /api/sync/log?limit=N` — recent sync log entries (newest first).
-- `POST /api/sync/run` — trigger a sync now (runs in background).
-- `GET  /api/sync/status` — whether a sync is currently running.
+- `POST /api/sync/run` — trigger a sync now (runs in background);
+  `{ "approve_trash": ["<destination>"] }` lifts the trash safety limit.
+- `GET  /api/sync/status` — on/off, schedule, running job, last run, trash size.
+- `POST /api/sync/preview` / `GET /api/sync/preview` — compare without changing anything.
+- `GET  /api/sync/trash` — photos moved to the trash.
+- `POST /api/sync/trash/delete` / `.../restore` — `{ "ids": [...] }` or `{ "all": true }`.
 
 **Stats**
 - `GET  /api/stats`
@@ -394,12 +412,12 @@ papaframe/
 ├── requirements.txt
 ├── static/
 │   ├── index.html         ← main dashboard (includes Latest Changes card)
-│   ├── admin.html         ← /admin page (includes Photo Sync Folders config)
+│   ├── admin.html         ← /admin page (Photo Sync settings, preview, trash)
 │   ├── style.css
 │   └── favicon.svg
 └── scripts/
     ├── start_frame.sh     ← slideshow launcher (sources config.sh)
-    ├── photo_sync.py      ← NAS-to-USB photo sync with resize
+    ├── photo_sync.py      ← NAS-to-USB photo sync (resize, EXIF, trash)
     ├── papaframe-screen   ← root helper for HDMI on/off (installed to /usr/local/bin)
     └── install.sh         ← Pi installer (apt deps, venv, autologin, systemd unit)
 ```
@@ -412,6 +430,20 @@ and the `cache/` folder holding cached photos + `manifest.tsv`).
 ---
 
 ## Changelog
+
+### v2.1.0
+
+- **Photo sync rework**: works from the difference between source and frame,
+  so photos that reach the NAS late are no longer skipped. Keeps EXIF (date
+  taken, GPS), gives copies the source's file time, and adds HEIC support.
+- **Sync settings in the admin page**: on/off switch, nightly time, resize
+  size, JPEG quality, trash folder. The server runs the nightly sync itself
+  (no cron job) and rebuilds the photo list and indexes afterwards.
+- **Preview differences** and a **Trash** list on the admin page: photos
+  removed from the source are moved to a trash folder, to be deleted or
+  restored after you confirm.
+- **Last month / 3 months / 6 months** filters next to the year filter.
+- Filter changes now reshuffle the slideshow immediately.
 
 ### v2.0.1
 

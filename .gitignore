@@ -13,6 +13,18 @@ schedule.json
 year_index.json
 location_index.json
 frame_display.log
+location_cache.tsv.*
+photo_dates.tsv
+*.rebuild
+
+# Photo sync state
+sync_log.json
+sync_preview.json
+sync_last_run.json
+sync_trash.json
+.sync_schedule.json
+.sync_state.json
+.sync_last_run
 
 # Photo cache (default CACHE_DIR)
 cache/

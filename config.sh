@@ -126,3 +126,23 @@ LOG_FILE="frame_display.log"
 LOG_MAX_MB=10
 LOG_BACKUPS=3
 
+# ── Photo sync ────────────────────────────────────────────────────
+# Nightly download of new photos from the folders in sync_config.json
+# (edit them on the admin page). "no" turns photo sync off completely.
+SYNC_ENABLED="yes"
+
+# When the nightly sync runs (HH:MM, 24h). The photo list and the
+# year / date / location indexes are rebuilt right after it.
+SYNC_TIME="03:00"
+
+# Synced photos are shrunk to fit this size (never enlarged) and saved
+# as JPEG at this quality, keeping their EXIF date and GPS.
+SYNC_MAX_WIDTH=1920
+SYNC_MAX_HEIGHT=1080
+SYNC_JPEG_QUALITY=85
+
+# Photos that disappear from the source are moved here and listed on the
+# admin page until you delete or restore them. Empty = .papaframe-trash at
+# the root of the destination drive.
+SYNC_TRASH_DIR=""
+

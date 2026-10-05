@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PapaFrame — Admin</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="style.css?v=2.0.1">
+  <link rel="stylesheet" href="style.css?v=2.1.0">
   <style>
     .admin-wrap { max-width: 760px; margin: 0 auto; padding: 1.5rem; }
     .admin-wrap h1 { margin-bottom: .25rem; }
@@ -104,6 +104,39 @@
     }
     #sync-add-btn:hover { opacity: 1; background: var(--card-bg, #f8f8f8); }
     #sync-status-banner { margin-top: .75rem; }
+    .sync-section h3 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
+    .sync-state { font-size: .88rem; opacity: .8; margin: -.25rem 0 1rem; }
+    .preview-pair {
+      border: 1px solid var(--border, #ddd); border-radius: 10px;
+      padding: .75rem 1rem; margin-bottom: .75rem; font-size: .9rem;
+    }
+    .preview-pair .pp-head { font-family: ui-monospace, Menlo, monospace; font-size: .82rem; word-break: break-all; }
+    .preview-pair .pp-stats { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; margin: .5rem 0; }
+    .preview-pair .pp-stats b { font-variant-numeric: tabular-nums; }
+    .preview-pair details { margin-top: .35rem; }
+    .preview-pair summary { cursor: pointer; opacity: .85; }
+    .path-list {
+      max-height: 220px; overflow: auto; margin: .35rem 0 0; padding: .4rem .6rem;
+      font-family: ui-monospace, Menlo, monospace; font-size: .78rem; line-height: 1.5;
+      background: var(--card-bg, #f6f6f6); border-radius: 6px; white-space: pre;
+    }
+    .trash-toolbar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: .5rem; }
+    .trash-list {
+      max-height: 360px; overflow: auto; border: 1px solid var(--border, #ddd);
+      border-radius: 8px; font-size: .82rem;
+    }
+    .trash-row {
+      display: grid; grid-template-columns: auto 1fr auto; gap: .6rem; align-items: center;
+      padding: .35rem .6rem; border-bottom: 1px solid var(--border, #eee);
+    }
+    .trash-row:last-child { border-bottom: none; }
+    .trash-row .tp { font-family: ui-monospace, Menlo, monospace; word-break: break-all; }
+    .trash-row .tm { opacity: .6; white-space: nowrap; }
+    .btn-danger {
+      background: #dc2626; color: #fff; border: none; border-radius: 8px;
+      padding: .5rem .9rem; font-weight: 600; cursor: pointer;
+    }
+    .btn-danger:disabled, .btn-secondary:disabled { opacity: .5; cursor: default; }
   </style>
 </head>
 <body>
@@ -119,7 +152,7 @@
   <div class="banner warn">
     Most changes require a server restart to take effect
     (<code>python3 server.py</code>). Changing <strong>Photo folders</strong>
-    also needs a photo-list rebuild — use the button at the bottom.
+    also needs a photo-list rebuild — use the button below the form.
   </div>
 
   <div id="status-banner"></div>
@@ -134,18 +167,44 @@
     </div>
   </form>
 
-  <!-- Sync Folders -->
+  <!-- Photo Sync -->
   <div class="sync-section">
-    <h2>Photo Sync Folders</h2>
-    <p class="sub">Sync photos from NAS source folders to local USB destinations.
-      New photos are resized to 1920x1080 and saved as JPEG. Subfolders are included automatically.</p>
+    <h2>Photo Sync</h2>
+    <p class="sub">Every night, new photos are downloaded from each source folder (e.g. on
+      precision) to its destination on this frame, resized and saved as JPEG with their
+      date and GPS kept. Then the photo list and the year / date / location filters are
+      rebuilt. Photos removed from the source go to the trash below for you to confirm.</p>
+    <div class="sync-state" id="sync-state"></div>
+
+    <div id="sync-settings"></div>
+    <div class="action-row" style="margin-top:.25rem">
+      <button type="button" id="sync-settings-save-btn" class="btn-start">💾 Save sync settings</button>
+    </div>
+
+    <h3>Folders</h3>
     <div id="sync-pairs"></div>
     <button type="button" id="sync-add-btn">+ Add folder pair</button>
     <div class="action-row">
       <button type="button" id="sync-save-btn" class="btn-start">💾 Save sync folders</button>
+      <button type="button" id="sync-preview-btn" class="btn-secondary">🔍 Preview differences</button>
       <button type="button" id="sync-run-btn" class="btn-restart">▶ Sync now</button>
     </div>
     <div id="sync-status-banner"></div>
+    <div id="sync-preview"></div>
+
+    <h3>Trash <span id="trash-summary" style="font-weight:400;opacity:.7"></span></h3>
+    <p class="sub">Photos that are no longer on the source. They are kept here until you
+      delete them. Restoring puts a photo back on the frame, but the next sync trashes it
+      again unless it is back on the source.</p>
+    <div class="trash-toolbar">
+      <label class="bool-row" style="display:flex;gap:.35rem;align-items:center">
+        <input type="checkbox" id="trash-all"> Select all
+      </label>
+      <button type="button" id="trash-delete-btn" class="btn-danger" disabled>🗑 Delete selected permanently</button>
+      <button type="button" id="trash-restore-btn" class="btn-secondary" disabled>↩ Restore selected</button>
+    </div>
+    <div class="trash-list" id="trash-list"></div>
+    <div id="trash-banner" style="margin-top:.75rem"></div>
   </div>
 </div>
 
@@ -205,7 +264,10 @@ async function loadConfig() {
     const res = await fetch('/api/config');
     const data = await res.json();
     pathEl.textContent = data.path;
-    fieldsEl.innerHTML = data.fields.map(renderField).join('');
+    const isSync = f => f.key.startsWith('SYNC_');
+    fieldsEl.innerHTML = data.fields.filter(f => !isSync(f)).map(renderField).join('');
+    document.getElementById('sync-settings').innerHTML =
+      data.fields.filter(isSync).map(renderField).join('');
     enhanceCacheSizeField();
   } catch (e) {
     showBanner('Failed to load config: ' + e.message, 'error');
@@ -315,12 +377,12 @@ async function saveConfig(ev) {
 }
 
 async function rebuildPhotoList() {
-  if (!confirm('Delete the master photo list so it rebuilds from PHOTO_DIRS on the next slideshow start?')) return;
+  if (!confirm('Rescan the photo folders (PHOTO_DIRS) and rebuild the photo list now? Takes a minute or two.')) return;
   try {
     const res = await fetch('/api/config/rebuild', { method: 'POST' });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'rebuild failed');
-    showBanner('Photo list cleared. It will be rebuilt the next time the slideshow starts.', 'success');
+    showBanner('Rescanning photo folders… the slideshow picks up the new list when it finishes.', 'success');
   } catch (e) {
     showBanner('Rebuild failed: ' + e.message, 'error');
   }
@@ -393,47 +455,224 @@ async function saveSyncConfig() {
   }
 }
 
-async function runSync() {
-  syncRunBtn.disabled = true;
-  syncRunBtn.textContent = '⏳ Syncing…';
+syncAddBtn.addEventListener('click', () => addSyncPairRow());
+syncSaveBtn.addEventListener('click', saveSyncConfig);
+syncRunBtn.addEventListener('click', () => runSync());
+
+// ── Sync settings (SYNC_* keys in config.sh; apply without a restart) ──
+async function saveSyncSettings() {
+  const payload = {};
+  for (const input of document.querySelectorAll('#sync-settings input[name]')) {
+    payload[input.name] = input.type === 'checkbox'
+      ? (input.checked ? 'yes' : 'no') : input.value;
+  }
+  if (payload.SYNC_TIME && !/^([01]?\d|2[0-3]):[0-5]\d$/.test(payload.SYNC_TIME.trim())) {
+    showSyncBanner('Nightly sync time must be HH:MM, e.g. 03:00', 'error');
+    return;
+  }
   try {
-    const res = await fetch('/api/sync/run', { method: 'POST' });
+    const res = await fetch('/api/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'save failed');
+    showSyncBanner('Sync settings saved — they apply from the next run.', 'success');
+    loadSyncStatus();
+  } catch (e) {
+    showSyncBanner('Save failed: ' + e.message, 'error');
+  }
+}
+document.getElementById('sync-settings-save-btn').addEventListener('click', saveSyncSettings);
+
+const fmtNum = n => Number(n || 0).toLocaleString();
+function fmtBytes(b) {
+  if (b >= 1e9) return (b / 1e9).toFixed(1) + ' GB';
+  if (b >= 1e6) return (b / 1e6).toFixed(0) + ' MB';
+  return Math.round(b / 1e3) + ' KB';
+}
+
+async function loadSyncStatus() {
+  try {
+    const st = await fetch('/api/sync/status').then(r => r.json());
+    const parts = [st.enabled ? `On — runs nightly at ${st.time}` : 'Off — photo sync is disabled'];
+    if (st.last_run && st.last_run.finished_at) {
+      const t = st.last_run.totals || {};
+      parts.push(`Last run ${new Date(st.last_run.finished_at).toLocaleString()}: ` +
+        `${fmtNum(t.copied)} copied, ${fmtNum(t.trashed)} trashed`);
+    }
+    if (st.job) parts.push(`⏳ ${st.job === 'preview' ? 'Preview' : 'Sync'} running…`);
+    document.getElementById('sync-state').textContent = parts.join(' · ');
+    syncRunBtn.disabled = !st.enabled || !!st.job;
+    syncRunBtn.title = st.enabled ? '' : 'Turn on Photo sync above first';
+    return st;
+  } catch (e) { return null; }
+}
+
+// Override: run (optionally approving a large trash batch) and poll.
+async function runSync(approveTrash = []) {
+  syncRunBtn.disabled = true;
+  try {
+    const res = await fetch('/api/sync/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approve_trash: approveTrash }),
+    });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'sync failed');
-    showSyncBanner('Sync started in background. Check the dashboard for progress.', 'info');
-    pollSyncStatus();
+    showSyncBanner('Sync started. Large first runs can take a few hours; ' +
+                   'progress shows on the dashboard under Latest Changes.', 'info');
+    pollJob();
   } catch (e) {
     showSyncBanner('Sync failed: ' + e.message, 'error');
-    syncRunBtn.disabled = false;
-    syncRunBtn.textContent = '▶ Sync now';
+    loadSyncStatus();
   }
 }
 
-async function pollSyncStatus() {
+function pollJob() {
+  loadSyncStatus();
   const poll = setInterval(async () => {
-    try {
-      const res = await fetch('/api/sync/status');
-      const data = await res.json();
-      if (!data.running) {
-        clearInterval(poll);
-        syncRunBtn.disabled = false;
-        syncRunBtn.textContent = '▶ Sync now';
-        showSyncBanner('Sync completed.', 'success');
-      }
-    } catch (e) {
+    const st = await loadSyncStatus();
+    if (st && !st.job) {
       clearInterval(poll);
-      syncRunBtn.disabled = false;
-      syncRunBtn.textContent = '▶ Sync now';
+      showSyncBanner('Done.', 'success');
+      loadPreview();
+      loadTrash();
     }
-  }, 3000);
+  }, 5000);
 }
 
-syncAddBtn.addEventListener('click', () => addSyncPairRow());
-syncSaveBtn.addEventListener('click', saveSyncConfig);
-syncRunBtn.addEventListener('click', runSync);
+// ── Preview differences ──
+const previewEl = document.getElementById('sync-preview');
+document.getElementById('sync-preview-btn').addEventListener('click', async () => {
+  try {
+    const res = await fetch('/api/sync/preview', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'preview failed');
+    showSyncBanner('Comparing source and frame folders… this takes a few minutes.', 'info');
+    pollJob();
+  } catch (e) {
+    showSyncBanner('Preview failed: ' + e.message, 'error');
+  }
+});
+
+function pathList(items, total) {
+  const more = total > items.length ? `\n… and ${fmtNum(total - items.length)} more` : '';
+  return `<div class="path-list">${esc(items.join('\n') + more)}</div>`;
+}
+
+async function loadPreview() {
+  let d;
+  try { d = await fetch('/api/sync/preview').then(r => r.json()); } catch (e) { return; }
+  const rep = d.report;
+  if (!rep) { previewEl.innerHTML = ''; return; }
+  const when = new Date(rep.finished_at || rep.generated_at).toLocaleString();
+  const cards = (rep.pairs || []).map(p => {
+    const head = `<div class="pp-head">${esc(p.source)} → ${esc(p.destination)}</div>`;
+    if (p.error) return `<div class="preview-pair">${head}<div class="banner error" style="margin:.5rem 0 0">${esc(p.error)}</div></div>`;
+    const skipped = Object.entries(p.skipped_by_ext || {}).slice(0, 6)
+      .map(([e, n]) => `${fmtNum(n)} ${esc(e)}`).join(', ');
+    let trashNote = '';
+    if (p.to_trash && p.trash_blocked) {
+      trashNote = `<div class="banner warn" style="margin:.5rem 0">
+        ${fmtNum(p.to_trash)} photos would go to the trash — more than the safety limit of
+        ${fmtNum(p.trash_limit)} for this folder, so the sync will not trash them on its own.
+        If the list below is right, approve it:
+        <div style="margin-top:.5rem"><button type="button" class="btn-danger approve-trash"
+          data-dst="${esc(p.destination)}">Sync now and move ${fmtNum(p.to_trash)} to trash</button></div></div>`;
+    }
+    return `<div class="preview-pair">${head}
+      <div class="pp-stats">
+        <span>On source: <b>${fmtNum(p.source_photos)}</b></span>
+        <span>On frame: <b>${fmtNum(p.frame_photos)}</b></span>
+        <span>To download: <b>${fmtNum(p.to_copy)}</b> (${fmtBytes(p.to_copy_bytes || 0)} before resizing)</span>
+        <span>No longer on source: <b>${fmtNum(p.to_trash)}</b></span>
+      </div>
+      ${skipped ? `<div style="opacity:.7;font-size:.82rem">Not photos, skipped: ${skipped}</div>` : ''}
+      ${trashNote}
+      ${p.to_copy ? `<details><summary>Photos to download (${fmtNum(p.to_copy)})</summary>${pathList(p.to_copy_list || [], p.to_copy)}</details>` : ''}
+      ${p.to_trash ? `<details><summary>Photos to move to trash (${fmtNum(p.to_trash)})</summary>${pathList(p.to_trash_list || [], p.to_trash)}</details>` : ''}
+    </div>`;
+  }).join('');
+  previewEl.innerHTML = `<h3>Differences <span style="font-weight:400;opacity:.7">(checked ${when})</span></h3>${cards}`;
+  previewEl.querySelectorAll('.approve-trash').forEach(btn => btn.addEventListener('click', () => {
+    if (confirm(`Download new photos and move ${btn.textContent.match(/[\d,]+/)[0]} photos from ${btn.dataset.dst} to the trash?\n\nNothing is deleted until you confirm it in the Trash list.`)) {
+      runSync([btn.dataset.dst]);
+    }
+  }));
+}
+
+// ── Trash ──
+const trashListEl = document.getElementById('trash-list');
+const trashAllEl  = document.getElementById('trash-all');
+const trashDelBtn = document.getElementById('trash-delete-btn');
+const trashResBtn = document.getElementById('trash-restore-btn');
+let _trash = { count: 0, entries: [] };
+
+function trashSelected() {
+  return [...trashListEl.querySelectorAll('input[type=checkbox]:checked')].map(c => c.value);
+}
+function updateTrashButtons() {
+  const n = trashAllEl.checked ? _trash.count : trashSelected().length;
+  trashDelBtn.disabled = trashResBtn.disabled = n === 0;
+  trashDelBtn.textContent = n ? `🗑 Delete ${fmtNum(n)} permanently` : '🗑 Delete selected permanently';
+  trashResBtn.textContent = n ? `↩ Restore ${fmtNum(n)}` : '↩ Restore selected';
+}
+
+async function loadTrash() {
+  try { _trash = await fetch('/api/sync/trash?limit=1000').then(r => r.json()); } catch (e) { return; }
+  document.getElementById('trash-summary').textContent =
+    _trash.count ? `— ${fmtNum(_trash.count)} photos, ${fmtBytes(_trash.bytes)}` : '— empty';
+  trashAllEl.checked = false;
+  trashListEl.style.display = _trash.count ? '' : 'none';
+  trashListEl.innerHTML = _trash.entries.map(e => `
+    <label class="trash-row">
+      <input type="checkbox" value="${esc(e.id)}">
+      <span class="tp" title="No longer at ${esc(e.missing_from || '')}">${esc(e.original)}</span>
+      <span class="tm">${new Date(e.trashed_at).toLocaleDateString()}</span>
+    </label>`).join('') + (_trash.truncated
+      ? `<div class="trash-row" style="display:block;opacity:.7">Showing the newest ${fmtNum(_trash.entries.length)} of ${fmtNum(_trash.count)}. "Select all" includes every one.</div>` : '');
+  updateTrashButtons();
+}
+
+trashListEl.addEventListener('change', () => { trashAllEl.checked = false; updateTrashButtons(); });
+trashAllEl.addEventListener('change', () => {
+  trashListEl.querySelectorAll('input[type=checkbox]').forEach(c => c.checked = trashAllEl.checked);
+  updateTrashButtons();
+});
+
+async function trashAction(kind) {
+  const all = trashAllEl.checked;
+  const ids = all ? [] : trashSelected();
+  const n = all ? _trash.count : ids.length;
+  const msg = kind === 'delete'
+    ? `Permanently delete ${n} photo(s) from this frame? This cannot be undone.\n(The originals are already gone from the source.)`
+    : `Restore ${n} photo(s) to the frame?`;
+  if (!n || !confirm(msg)) return;
+  const banner = document.getElementById('trash-banner');
+  try {
+    const res = await fetch(`/api/sync/trash/${kind}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(all ? { all: true } : { ids }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `${kind} failed`);
+    banner.innerHTML = kind === 'delete'
+      ? `<div class="banner success">Deleted ${fmtNum(data.deleted)} photo(s).</div>`
+      : `<div class="banner ${data.failed.length ? 'warn' : 'success'}">Restored ${fmtNum(data.restored)} photo(s).` +
+        (data.failed.length ? ` Could not restore: ${esc(data.failed.join('; '))}` : '') + '</div>';
+  } catch (e) {
+    banner.innerHTML = `<div class="banner error">${esc(e.message)}</div>`;
+  }
+  loadTrash();
+}
+trashDelBtn.addEventListener('click', () => trashAction('delete'));
+trashResBtn.addEventListener('click', () => trashAction('restore'));
 
 loadConfig();
 loadSyncConfig();
+loadSyncStatus().then(st => { if (st && st.job) pollJob(); });
+loadPreview();
+loadTrash();
 </script>
 </body>
 </html>

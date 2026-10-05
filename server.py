@@ -117,6 +117,21 @@ CONFIG_SCHEMA = [
     ('SHARED_LOCATION_CACHE', 'str', 'Shared location cache',
      '"auto" looks at <photo-dir-mount>/.papaframe/location_cache.tsv. '
      'Explicit path uses that file. Empty / "no" disables sharing (each Pi scans alone).'),
+    # Photo sync — shown in the admin page's Photo Sync section, read fresh
+    # on every run so changes apply without a restart.
+    ('SYNC_ENABLED',      'bool', 'Photo sync',
+     'Off disables photo sync completely: no nightly run and no "Sync now".'),
+    ('SYNC_TIME',         'str', 'Nightly sync time',
+     'HH:MM (24h). New photos are downloaded, then the photo list and indexes are rebuilt.'),
+    ('SYNC_MAX_WIDTH',    'int', 'Resize to width (px)',
+     'Synced photos are shrunk to fit this width (never enlarged).'),
+    ('SYNC_MAX_HEIGHT',   'int', 'Resize to height (px)',
+     'Synced photos are shrunk to fit this height (never enlarged).'),
+    ('SYNC_JPEG_QUALITY', 'int', 'JPEG quality',
+     '1-100 for synced photos. 85 is a good balance of size and quality.'),
+    ('SYNC_TRASH_DIR',    'str', 'Trash folder',
+     'Where photos removed from the source are moved. Empty = .papaframe-trash '
+     'at the root of the destination drive.'),
 ]
 
 def write_config(path, updates):
@@ -334,6 +349,9 @@ FILTERED_LIST   = Path('/tmp/frame_filtered_list.txt')
 SLIDESHOW_STATE = Path('/tmp/frame_slideshow_state.json')
 SCHEDULE_OFF_FLAG = Path('/tmp/frame_schedule_off')
 USER_STOP_FLAG    = Path("/tmp/frame_user_stopped")
+# Asks start_frame.sh to reshuffle LIVE_LIST and relaunch the viewer, so a
+# filter change or a rebuilt photo list shows up right away.
+RESHUFFLE_REQUEST = Path('/tmp/frame_reshuffle_request')
 
 # Persistent location cache: one line per photo, "<path>\t<cc>".
 # "cc" is an ISO-3166-1 alpha-2 country code, or "-" for no GPS / unknown.
@@ -485,10 +503,13 @@ def get_slideshow_state():
     return {}
 
 def get_current_year_filter():
-    """Read the active year filter from the control file."""
+    """Read the active date filter: a year (int), a "last N months" key
+    such as 'last3m' (str), or None."""
     val = _read_file(YEAR_FILTER)
     if val and val.isdigit() and len(val) == 4:
         return int(val)
+    if val in RECENT_FILTERS:
+        return val
     return None
 
 def get_current_location_filter():
@@ -661,6 +682,148 @@ def build_year_index():
         logger.info(f'Year index built: {len(index)} years from {count} photos')
     t = threading.Thread(target=_build, daemon=True)
     t.start()
+
+# ── Photo dates / "last N months" filters ─────────────────────────
+# PHOTO_DATES holds "path<TAB>YYYYMMDD" for every photo in SOURCE_FILE. The
+# date is when the photo was taken, as best we can tell without opening it:
+#   1. a full date in the file name (20261004_132137.jpg, IMG-20200101-WA..)
+#   2. a year-month folder (/2026/2026-10/, /2017/07/) — day from the file
+#      time when it falls in that month, else the 15th
+#   3. the file's modification time (photo_sync sets it to the source's),
+#      unless the path names a different year — then Jan 1 of that year.
+PHOTO_DATES   = SOURCE_FILE.parent / 'photo_dates.tsv'
+LIST_EXTS     = ('.jpg', '.jpeg', '.png')   # same set start_frame.sh scans
+RECENT_FILTERS = {                          # key: (months, label)
+    'last1m': (1, 'Last month'),
+    'last3m': (3, 'Last 3 months'),
+    'last6m': (6, 'Last 6 months'),
+}
+FNAME_DATE_RE = re.compile(
+    r'(?<!\d)((?:19|20)\d{2})[-_]?(0[1-9]|1[0-2])[-_]?(0[1-9]|[12]\d|3[01])(?!\d)')
+PATH_YM_RE = re.compile(r'/((?:19|20)\d{2})[-_/](0[1-9]|1[0-2])(?=/)')
+_library_lock = threading.Lock()
+_recent_cache = {'at': 0.0, 'counts': {}}
+
+def _photo_date(path, mtime):
+    """Best-guess 'YYYYMMDD' the photo was taken (see PHOTO_DATES above)."""
+    m = FNAME_DATE_RE.search(os.path.basename(path))
+    if m:
+        return m.group(1) + m.group(2) + m.group(3)
+    fdate = datetime.fromtimestamp(mtime)
+    ym = PATH_YM_RE.findall(path)
+    if ym:
+        y, mo = ym[-1]
+        if fdate.year == int(y) and fdate.month == int(mo):
+            return fdate.strftime('%Y%m%d')
+        return f'{y}{mo}15'
+    y = YEAR_RE.findall(path)
+    if y and int(y[-1]) != fdate.year:
+        return f'{y[-1]}0101'
+    return fdate.strftime('%Y%m%d')
+
+def _photo_dirs():
+    """PHOTO_DIRS read fresh from config.sh (admin edits apply on rebuild)."""
+    raw = load_config(CONFIG_PATH).get('PHOTO_DIRS', '$HOME/Pictures')
+    return [Path(os.path.expandvars(os.path.expanduser(p)))
+            for p in raw.split(':') if p]
+
+def rebuild_photo_library():
+    """Rescan PHOTO_DIRS into SOURCE_FILE and PHOTO_DATES, then refresh the
+    year / location / recent indexes and ask the slideshow to reshuffle.
+    Runs synchronously (call it from a background thread). Refuses to
+    replace the list with an empty one — that means the drive is missing."""
+    if not _library_lock.acquire(blocking=False):
+        logger.info('Photo library rebuild already running')
+        return False
+    try:
+        started = time.time()
+        src_tmp = SOURCE_FILE.with_name(SOURCE_FILE.name + '.rebuild')
+        dates_tmp = PHOTO_DATES.with_name(PHOTO_DATES.name + '.rebuild')
+        count = 0
+        with src_tmp.open('w', encoding='utf-8') as fl, \
+             dates_tmp.open('w', encoding='utf-8') as fd:
+            for root in _photo_dirs():
+                if not root.is_dir():
+                    logger.warning(f'Photo folder missing, skipped: {root}')
+                    continue
+                for dirpath, dirnames, filenames in os.walk(root):
+                    dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+                    for name in filenames:
+                        if name.startswith('.') or not name.lower().endswith(LIST_EXTS):
+                            continue
+                        p = os.path.join(dirpath, name)
+                        if '\n' in p or '\t' in p:
+                            continue
+                        try:
+                            mtime = os.stat(p).st_mtime
+                        except OSError:
+                            continue
+                        fl.write(p + '\n')
+                        fd.write(f'{p}\t{_photo_date(p, mtime)}\n')
+                        count += 1
+        if count == 0:
+            logger.error('Photo library rebuild found no photos — keeping the old list')
+            src_tmp.unlink(missing_ok=True)
+            dates_tmp.unlink(missing_ok=True)
+            return False
+        src_tmp.replace(SOURCE_FILE)
+        dates_tmp.replace(PHOTO_DATES)
+        logger.info(f'Photo library rebuilt: {count} photos in '
+                    f'{time.time() - started:.0f}s')
+        build_year_index()
+        build_location_index(allow_scan=False)
+        _recent_cache['at'] = 0.0
+        active = get_current_year_filter()
+        if isinstance(active, str):
+            _write_recent_list(active)
+        _write_file(RESHUFFLE_REQUEST, '1')
+        return True
+    except Exception as e:
+        logger.error(f'Photo library rebuild failed: {e}')
+        return False
+    finally:
+        _library_lock.release()
+
+def _months_ago(months):
+    """'YYYYMMDD' for the same day `months` months before today."""
+    today = datetime.now().date()
+    y, m = divmod(today.month - 1 - months, 12)
+    y, m = today.year + y, m + 1
+    for d in (today.day, 30, 29, 28):
+        try:
+            return datetime(y, m, d).strftime('%Y%m%d')
+        except ValueError:
+            continue
+
+def _iter_photo_dates():
+    try:
+        with PHOTO_DATES.open('r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                path, _, date = line.rstrip('\n').rpartition('\t')
+                if path and date:
+                    yield path, date
+    except OSError:
+        return
+
+def recent_counts():
+    """{key: photo count} for each "last N months" filter (cached 10 min)."""
+    if time.time() - _recent_cache['at'] < 600:
+        return _recent_cache['counts']
+    cutoffs = {k: _months_ago(n) for k, (n, _l) in RECENT_FILTERS.items()}
+    counts = dict.fromkeys(RECENT_FILTERS, 0)
+    for _p, date in _iter_photo_dates():
+        for k, c in cutoffs.items():
+            if date >= c:
+                counts[k] += 1
+    _recent_cache.update(at=time.time(), counts=counts)
+    return counts
+
+def _write_recent_list(key):
+    """Write the photos taken in the last N months to FILTERED_LIST."""
+    cutoff = _months_ago(RECENT_FILTERS[key][0])
+    paths = [p for p, d in _iter_photo_dates() if d >= cutoff]
+    FILTERED_LIST.write_text('\n'.join(paths) + ('\n' if paths else ''))
+    return len(paths)
 
 # ── Location index ────────────────────────────────────────────────
 # Caches a country code per photo so we can filter the slideshow by country.
@@ -1734,14 +1897,11 @@ def api_config_set():
 
 @app.route('/api/config/rebuild', methods=['POST'])
 def api_config_rebuild():
-    """Delete the master photo list so start_frame.sh rebuilds it from
-    PHOTO_DIRS on the next slideshow start."""
-    try:
-        SOURCE_FILE.unlink(missing_ok=True)
-        logger.info(f'Deleted {SOURCE_FILE} for rebuild')
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    """Rescan PHOTO_DIRS into the master photo list (in the background) and
+    rebuild the indexes; the slideshow reshuffles when it finishes."""
+    threading.Thread(target=rebuild_photo_library, daemon=True).start()
+    logger.info('Photo library rebuild requested from admin page')
+    return jsonify({'success': True})
 
 # ── API: Photo cache ───────────────────────────────────────────────
 @app.route('/api/cache/status', methods=['GET'])
@@ -2091,8 +2251,12 @@ def api_years():
         key=lambda x: x['year'], reverse=True,
     )
     total = sum(x['count'] for x in years)
+    counts = recent_counts()
+    recent = [{'key': k, 'label': label, 'count': counts.get(k, 0)}
+              for k, (_n, label) in RECENT_FILTERS.items()]
     return jsonify({
         'years': years,
+        'recent': recent,
         'total': total,
         'active': get_current_year_filter(),
         'ready': state['year_index_ready'],
@@ -2104,15 +2268,25 @@ def api_setfilter():
     and we kill fbi so the bash loop reshuffles immediately."""
     data = request.json or {}
     year = data.get('year')
+    if year is not None and str(year) not in RECENT_FILTERS and not (
+            str(year).isdigit() and len(str(year)) == 4):
+        return jsonify({'error': f'Unknown filter: {year}'}), 400
 
-    if year:
+    # Year, recent and location filters are mutually exclusive.
+    LOCATION_FILTER.unlink(missing_ok=True)
+    FILTERED_LIST.unlink(missing_ok=True)
+
+    if year in RECENT_FILTERS:
+        count = _write_recent_list(year)
+        if count == 0:
+            FILTERED_LIST.unlink(missing_ok=True)
+            return jsonify({'error': f'No photos from the {RECENT_FILTERS[year][1].lower()}'}), 400
+        _write_file(YEAR_FILTER, year)
+    elif year:
         _write_file(YEAR_FILTER, year)
     else:
         YEAR_FILTER.unlink(missing_ok=True)
-
-    # Year and location filters are mutually exclusive.
-    LOCATION_FILTER.unlink(missing_ok=True)
-    FILTERED_LIST.unlink(missing_ok=True)
+    _write_file(RESHUFFLE_REQUEST, '1')
 
     # Kill fbi so the bash script reshuffles with the new filter
     viewer_pid = get_viewer_pid()
@@ -2127,8 +2301,8 @@ def api_setfilter():
 
 @app.route('/api/rebuildyears', methods=['POST'])
 def api_rebuildyears():
-    """Rebuild year index."""
-    build_year_index()
+    """Rescan the photo folders, then rebuild the year / recent indexes."""
+    threading.Thread(target=rebuild_photo_library, daemon=True).start()
     return jsonify({'success': True})
 
 # ── API: Location filter ──────────────────────────────────────────
@@ -2176,6 +2350,7 @@ def api_setlocationfilter():
 
     # Location and year filters are mutually exclusive.
     YEAR_FILTER.unlink(missing_ok=True)
+    _write_file(RESHUFFLE_REQUEST, '1')
 
     # Kill fbi so start_frame.sh reshuffles with the new filter.
     viewer_pid = get_viewer_pid()
@@ -2379,35 +2554,116 @@ def api_clearsession():
     return jsonify({'success': True})
 
 # ── API: Photo Sync ────────────────────────────────────────────────
+# scripts/photo_sync.py does the work; the server runs it nightly at
+# SYNC_TIME (replacing the old cron job), on demand ("Sync now"), or in
+# --preview mode, then rebuilds the photo library after a real sync.
 SYNC_CONFIG_FILE = Path(__file__).parent / 'sync_config.json'
 SYNC_LOG_FILE    = Path(__file__).parent / 'sync_log.json'
+SYNC_PREVIEW_FILE = Path(__file__).parent / 'sync_preview.json'
+SYNC_LAST_RUN_FILE = Path(__file__).parent / 'sync_last_run.json'
+SYNC_TRASH_FILE  = Path(__file__).parent / 'sync_trash.json'
+SYNC_SCHEDULE_FILE = Path(__file__).parent / '.sync_schedule.json'
+SYNC_OUTPUT_LOG  = Path(__file__).parent / 'sync.log'
 SYNC_SCRIPT      = Path(__file__).parent / 'scripts' / 'photo_sync.py'
+SYNC_CATCHUP_HOURS = 6     # a missed nightly run still happens this long after SYNC_TIME
 _sync_lock       = threading.Lock()
-_sync_running    = False
+_sync_job        = None    # 'sync' | 'preview' while photo_sync.py runs
+
+def _sync_settings():
+    """Sync on/off and run time, read fresh from config.sh."""
+    cfg = load_config(CONFIG_PATH)
+    enabled = str(cfg.get('SYNC_ENABLED', 'yes')).strip().lower() in ('yes', 'true', '1', 'on')
+    try:
+        hm = _parse_hm('SYNC_TIME', cfg.get('SYNC_TIME', '03:00'))
+    except ValueError:
+        hm = (3, 0)
+    return {'enabled': enabled, 'time': hm}
+
+def _load_json_file(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+def _save_json_file(path, data):
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2)
+    tmp.replace(path)
 
 def _load_sync_config():
-    if not SYNC_CONFIG_FILE.exists():
-        return []
-    try:
-        with open(SYNC_CONFIG_FILE) as f:
-            return json.load(f).get('folders', [])
-    except (json.JSONDecodeError, ValueError):
-        return []
+    data = _load_json_file(SYNC_CONFIG_FILE, {})
+    return data.get('folders', []) if isinstance(data, dict) else []
 
 def _save_sync_config(folders):
-    tmp = SYNC_CONFIG_FILE.with_suffix('.tmp')
-    with open(tmp, 'w') as f:
-        json.dump({'folders': folders}, f, indent=2)
-    tmp.replace(SYNC_CONFIG_FILE)
+    _save_json_file(SYNC_CONFIG_FILE, {'folders': folders})
 
 def _load_sync_log():
-    if not SYNC_LOG_FILE.exists():
-        return []
-    try:
-        with open(SYNC_LOG_FILE) as f:
-            return json.load(f)
-    except (json.JSONDecodeError, ValueError):
-        return []
+    data = _load_json_file(SYNC_LOG_FILE, [])
+    return data if isinstance(data, list) else []
+
+def _start_sync_job(kind, approve_trash=()):
+    """Run photo_sync.py in a background thread. kind is 'sync' or
+    'preview'. Returns False if a job is already running."""
+    global _sync_job
+    with _sync_lock:
+        if _sync_job:
+            return False
+        _sync_job = kind
+
+    def _run():
+        global _sync_job
+        cmd = [sys.executable, str(SYNC_SCRIPT)]
+        if kind == 'preview':
+            cmd.append('--preview')
+        for dst in approve_trash:
+            cmd += ['--approve-trash', dst]
+        try:
+            # Keep the plain-text run log from growing without bound.
+            if SYNC_OUTPUT_LOG.exists() and SYNC_OUTPUT_LOG.stat().st_size > 5 * 1024 * 1024:
+                SYNC_OUTPUT_LOG.replace(SYNC_OUTPUT_LOG.with_suffix('.log.1'))
+            logger.info(f'Photo {kind} started')
+            with SYNC_OUTPUT_LOG.open('a') as out:
+                rc = subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT,
+                                    env={**os.environ, 'PYTHONUNBUFFERED': '1'}).returncode
+            logger.info(f'Photo {kind} finished (exit {rc})')
+            if kind == 'sync':
+                rebuild_photo_library()
+        except Exception as e:
+            logger.error(f'Photo {kind} failed: {e}')
+        finally:
+            _sync_job = None
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
+
+def _run_sync_scheduler():
+    """Start the nightly sync at SYNC_TIME. If the server was down at that
+    minute, the run still happens within SYNC_CATCHUP_HOURS; it never runs
+    twice on the same day."""
+    while True:
+        try:
+            cfg = _sync_settings()
+            if cfg['enabled'] and _load_sync_config():
+                now = datetime.now()
+                due = now.replace(hour=cfg['time'][0], minute=cfg['time'][1],
+                                  second=0, microsecond=0)
+                today = now.strftime('%Y-%m-%d')
+                last = _load_json_file(SYNC_SCHEDULE_FILE, {}).get('last_auto_run')
+                in_window = 0 <= (now - due).total_seconds() < SYNC_CATCHUP_HOURS * 3600
+                if in_window and last != today and _start_sync_job('sync'):
+                    _save_json_file(SYNC_SCHEDULE_FILE, {'last_auto_run': today})
+                    logger.info('Nightly photo sync started')
+        except Exception as e:
+            logger.error(f'Sync scheduler error: {e}')
+        time.sleep(60)
+
+def _start_sync_scheduler():
+    threading.Thread(target=_run_sync_scheduler, daemon=True).start()
+    cfg = _sync_settings()
+    logger.info(f'Photo sync scheduler started (at {cfg["time"][0]:02d}:'
+                f'{cfg["time"][1]:02d}, enabled={cfg["enabled"]})')
 
 @app.route('/api/sync/config', methods=['GET'])
 def api_sync_config_get():
@@ -2415,7 +2671,7 @@ def api_sync_config_get():
 
 @app.route('/api/sync/config', methods=['POST'])
 def api_sync_config_set():
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     folders = data.get('folders', [])
     cleaned = []
     for f in folders:
@@ -2430,44 +2686,128 @@ def api_sync_config_set():
 @app.route('/api/sync/log', methods=['GET'])
 def api_sync_log():
     entries = _load_sync_log()
+    total = len(entries)
     entries.reverse()
     limit = request.args.get('limit', type=int)
     if limit and limit > 0:
         entries = entries[:limit]
-    return jsonify({'entries': entries, 'total': len(_load_sync_log())})
+    return jsonify({'entries': entries, 'total': total})
 
 @app.route('/api/sync/run', methods=['POST'])
 def api_sync_run():
-    global _sync_running
-    if _sync_running:
-        return jsonify({'error': 'Sync already in progress'}), 409
-
-    def _run_sync():
-        global _sync_running
-        try:
-            _sync_running = True
-            logger.info('Manual photo sync started')
-            subprocess.run(
-                [sys.executable, str(SYNC_SCRIPT)],
-                timeout=3600,
-            )
-            logger.info('Manual photo sync completed')
-        except Exception as e:
-            logger.error(f'Photo sync failed: {e}')
-        finally:
-            _sync_running = False
-
-    with _sync_lock:
-        if _sync_running:
-            return jsonify({'error': 'Sync already in progress'}), 409
-        t = threading.Thread(target=_run_sync, daemon=True)
-        t.start()
-
+    if not _sync_settings()['enabled']:
+        return jsonify({'error': 'Photo sync is disabled in the admin page'}), 409
+    data = request.get_json(silent=True) or {}
+    known = {f['destination'] for f in _load_sync_config()}
+    approve = [d for d in data.get('approve_trash', []) if d in known]
+    if not _start_sync_job('sync', approve_trash=approve):
+        return jsonify({'error': f'A photo {_sync_job} is already running'}), 409
     return jsonify({'success': True, 'message': 'Sync started in background'})
+
+@app.route('/api/sync/preview', methods=['POST'])
+def api_sync_preview_run():
+    """Compare source and frame without changing anything."""
+    if not _start_sync_job('preview'):
+        return jsonify({'error': f'A photo {_sync_job} is already running'}), 409
+    return jsonify({'success': True})
+
+@app.route('/api/sync/preview', methods=['GET'])
+def api_sync_preview_get():
+    return jsonify({'running': _sync_job == 'preview',
+                    'report': _load_json_file(SYNC_PREVIEW_FILE, None)})
 
 @app.route('/api/sync/status', methods=['GET'])
 def api_sync_status():
-    return jsonify({'running': _sync_running})
+    cfg = _sync_settings()
+    last = _load_json_file(SYNC_LAST_RUN_FILE, None)
+    return jsonify({
+        'running': _sync_job == 'sync',
+        'job': _sync_job,
+        'enabled': cfg['enabled'],
+        'time': f'{cfg["time"][0]:02d}:{cfg["time"][1]:02d}',
+        'last_run': {'finished_at': last.get('finished_at'),
+                     'totals': last.get('totals')} if last else None,
+        'trash_count': len(_load_json_file(SYNC_TRASH_FILE, [])),
+    })
+
+# ── API: Sync trash ───────────────────────────────────────────────
+# Photos that disappeared from the source are moved to a trash folder by
+# photo_sync.py and listed in SYNC_TRASH_FILE. Nothing is deleted until
+# the admin confirms it here.
+def _trash_select(entries, data):
+    if data.get('all'):
+        return entries, []
+    ids = set(data.get('ids') or [])
+    return ([e for e in entries if e.get('id') in ids],
+            [e for e in entries if e.get('id') not in ids])
+
+def _prune_empty_parents(path, stop_names=('.papaframe-trash',)):
+    d = Path(path).parent
+    while d.name and d.name not in stop_names and d != d.parent:
+        try:
+            d.rmdir()
+        except OSError:
+            break
+        d = d.parent
+
+@app.route('/api/sync/trash', methods=['GET'])
+def api_sync_trash():
+    entries = _load_json_file(SYNC_TRASH_FILE, [])
+    entries.sort(key=lambda e: e.get('trashed_at', ''), reverse=True)
+    limit = request.args.get('limit', default=1000, type=int)
+    return jsonify({
+        'count': len(entries),
+        'bytes': sum(e.get('size', 0) for e in entries),
+        'entries': entries[:limit],
+        'truncated': len(entries) > limit,
+    })
+
+@app.route('/api/sync/trash/delete', methods=['POST'])
+def api_sync_trash_delete():
+    """Permanently delete trashed photos ({ids: [...]} or {all: true})."""
+    if _sync_job == 'sync':
+        return jsonify({'error': 'Wait for the running sync to finish'}), 409
+    entries = _load_json_file(SYNC_TRASH_FILE, [])
+    chosen, kept = _trash_select(entries, request.get_json(silent=True) or {})
+    deleted = 0
+    for e in chosen:
+        try:
+            Path(e['trashed']).unlink(missing_ok=True)
+            _prune_empty_parents(e['trashed'])
+            deleted += 1
+        except OSError as err:
+            logger.error(f'Could not delete {e.get("trashed")}: {err}')
+            kept.append(e)
+    _save_json_file(SYNC_TRASH_FILE, kept)
+    logger.info(f'Sync trash: permanently deleted {deleted} photo(s)')
+    return jsonify({'success': True, 'deleted': deleted, 'remaining': len(kept)})
+
+@app.route('/api/sync/trash/restore', methods=['POST'])
+def api_sync_trash_restore():
+    """Move trashed photos back to where they were. A photo that is still
+    missing from the source will be trashed again by the next sync."""
+    if _sync_job == 'sync':
+        return jsonify({'error': 'Wait for the running sync to finish'}), 409
+    entries = _load_json_file(SYNC_TRASH_FILE, [])
+    chosen, kept = _trash_select(entries, request.get_json(silent=True) or {})
+    restored, failed = 0, []
+    for e in chosen:
+        dst = Path(e['original'])
+        try:
+            if dst.exists():
+                raise FileExistsError(f'{dst} already exists')
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(e['trashed'], dst)
+            _prune_empty_parents(e['trashed'])
+            restored += 1
+        except Exception as err:
+            failed.append(f'{dst.name}: {err}')
+            kept.append(e)
+    _save_json_file(SYNC_TRASH_FILE, kept)
+    if restored:
+        threading.Thread(target=rebuild_photo_library, daemon=True).start()
+    logger.info(f'Sync trash: restored {restored} photo(s)')
+    return jsonify({'success': True, 'restored': restored, 'failed': failed[:20]})
 
 # ── Entry point ────────────────────────────────────────────────────
 if __name__ == '__main__':
@@ -2492,6 +2832,10 @@ if __name__ == '__main__':
     _start_scheduler()
     logger.info('Starting photo cache worker...')
     _start_cache_worker()
+    _start_sync_scheduler()
+    if not PHOTO_DATES.exists():
+        logger.info('No photo date index yet — rebuilding the photo library...')
+        threading.Thread(target=rebuild_photo_library, daemon=True).start()
     logger.info(f'Server starting on http://{SERVER_HOST}:{SERVER_PORT}')
     print(f'Serving http://{SERVER_HOST}:{SERVER_PORT}')
     app.run(host=SERVER_HOST, port=SERVER_PORT, debug=False, use_reloader=False)

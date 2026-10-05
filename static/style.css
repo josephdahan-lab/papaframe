@@ -828,6 +828,9 @@ button.loading {
   opacity: .75;
 }
 .year-btn-active .year-btn-count { opacity: .85; }
+.year-btn-recent { border-style: dashed; }
+.year-btn-recent.year-btn-active { border-style: solid; }
+.year-btn:disabled { opacity: .45; cursor: default; }
 
 /* ── Page load animation ────────────────────────────────────────────── */
 @keyframes fadeInUp {

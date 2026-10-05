@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PapaFrame</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="style.css?v=2.0.1">
+  <link rel="stylesheet" href="style.css?v=2.1.0">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -297,7 +297,7 @@
       <span class="section-title" style="margin:0">Filter by Year</span>
       <span class="year-filter-status" id="year-filter-status"></span>
       <button class="btn-secondary year-rebuild-btn" id="year-rebuild-btn"
-              title="Rebuild year index after adding photos">↺ Rebuild index</button>
+              title="Rescan the photo folders and rebuild the year and date filters">↺ Rebuild index</button>
     </div>
     <div class="year-buttons" id="year-buttons">
       <span class="year-loading">Building year index…</span>
@@ -782,30 +782,38 @@ function fmtCount(n) {
   return String(n);
 }
 
-function renderYearButtons(years, active, total) {
-  const container = document.getElementById('year-buttons');
-  container.innerHTML = '';
-
-  // "All Photos" button
-  const allBtn = document.createElement('button');
-  allBtn.className = 'year-btn' + (active === null ? ' year-btn-active' : '');
-  allBtn.innerHTML = `<span class="year-btn-label">All Photos</span><span class="year-btn-count">${fmtCount(total)}</span>`;
-  allBtn.addEventListener('click', () => doSetFilter(null));
-  container.appendChild(allBtn);
-
-  years.forEach(({year, count}) => {
-    const btn = document.createElement('button');
-    btn.className = 'year-btn' + (active === year ? ' year-btn-active' : '');
-    btn.innerHTML = `<span class="year-btn-label">${year}</span><span class="year-btn-count">${fmtCount(count)}</span>`;
-    btn.addEventListener('click', () => doSetFilter(year));
-    container.appendChild(btn);
-  });
+// A filter is a year (number), a "last N months" key ('last3m'), or null.
+function yearBtn(filter, label, count, active) {
+  const btn = document.createElement('button');
+  btn.className = 'year-btn' + (active === filter ? ' year-btn-active' : '');
+  btn.dataset.filter = filter === null ? '' : String(filter);
+  btn.innerHTML = `<span class="year-btn-label">${label}</span><span class="year-btn-count">${fmtCount(count)}</span>`;
+  btn.addEventListener('click', () => doSetFilter(filter, label));
+  return btn;
 }
 
-function updateYearStatus(active, count) {
+function renderYearButtons(years, recent, active, total) {
+  const container = document.getElementById('year-buttons');
+  container.innerHTML = '';
+  container.appendChild(yearBtn(null, 'All Photos', total, active));
+  (recent || []).forEach(({key, label, count}) => {
+    const btn = yearBtn(key, label, count, active);
+    btn.classList.add('year-btn-recent');
+    if (!count) btn.disabled = true;
+    container.appendChild(btn);
+  });
+  years.forEach(({year, count}) => container.appendChild(yearBtn(year, String(year), count, active)));
+}
+
+function filterLabel(active, recent) {
+  const r = (recent || []).find(x => x.key === active);
+  return r ? r.label.toLowerCase() : String(active);
+}
+
+function updateYearStatus(label, count) {
   const el = document.getElementById('year-filter-status');
-  if (active) {
-    el.textContent = count ? `Showing ${active} — ${fmtCount(count)} photos` : `Showing ${active} only`;
+  if (label) {
+    el.textContent = count ? `Showing ${label} — ${fmtCount(count)} photos` : `Showing ${label} only`;
     el.className = 'year-filter-status active';
   } else {
     el.textContent = 'All years';
@@ -819,52 +827,52 @@ async function fetchYears() {
     _yearActive = d.active;
     _yearReady  = d.ready;
     if (d.years.length > 0) {
-      renderYearButtons(d.years, d.active, d.total || 0);
+      renderYearButtons(d.years, d.recent, d.active, d.total || 0);
     } else if (!d.ready) {
       document.getElementById('year-buttons').innerHTML =
         '<span class="year-loading">Building year index… check back in a moment.</span>';
     }
-    // Find count for the active year
-    const activeEntry = d.active ? d.years.find(y => y.year === d.active) : null;
-    updateYearStatus(d.active, activeEntry ? activeEntry.count : null);
+    const entry = d.active === null ? null
+      : (d.recent || []).find(r => r.key === d.active) || d.years.find(y => y.year === d.active);
+    updateYearStatus(d.active === null ? null : filterLabel(d.active, d.recent),
+                     entry ? entry.count : null);
   } catch(e) { console.error('years:', e); }
 }
 
-async function doSetFilter(year) {
+async function doSetFilter(filter, label) {
   // Optimistically update UI immediately
-  _yearActive = year;
-
-  // Find the count for the selected year from the rendered buttons
+  _yearActive = filter;
+  const want = filter === null ? '' : String(filter);
   let selectedCount = null;
-  document.querySelectorAll('.year-btn').forEach(b => {
-    const label = b.querySelector('.year-btn-label').textContent;
-    const isAll = label === 'All Photos';
-    const isActive = (year === null && isAll) || (year !== null && label === String(year));
+  document.querySelectorAll('#year-buttons .year-btn').forEach(b => {
+    const isActive = b.dataset.filter === want;
     b.classList.toggle('year-btn-active', isActive);
-    if (isActive && year !== null) {
+    if (isActive && filter !== null) {
       const countEl = b.querySelector('.year-btn-count');
       if (countEl) selectedCount = countEl.textContent;
     }
   });
-  updateYearStatus(year, selectedCount);
+  const shown = filter === null ? null : (typeof filter === 'number' ? label : label.toLowerCase());
+  updateYearStatus(shown, selectedCount);
 
   try {
     const res  = await fetch('/api/setfilter', {
       method:  'POST',
       headers: {'Content-Type': 'application/json'},
-      body:    JSON.stringify({ year }),
+      body:    JSON.stringify({ year: filter }),
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    if (year) {
-      toast(`Filtering to ${year}`, `Reshuffling slideshow with ${selectedCount || ''} matching photos`, 'success');
+    if (filter !== null) {
+      toast(`Filtering to ${shown}`, `Reshuffling slideshow with ${selectedCount || ''} matching photos`, 'success');
     } else {
       toast('All photos', 'Reshuffling slideshow with entire library', 'success');
     }
-    // Re-fetch status after fbi restarts
+    // Re-fetch status after the viewer restarts
     setTimeout(fetchStatus, 4000);
   } catch(e) {
     toast('Filter failed', e.message, 'error');
+    fetchYears();
   }
 }
 
@@ -872,7 +880,7 @@ document.getElementById('year-rebuild-btn').addEventListener('click', async () =
   document.getElementById('year-buttons').innerHTML =
     '<span class="year-loading">Rebuilding… this may take a minute.</span>';
   await fetch('/api/rebuildyears', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-  toast('Rebuilding year index', 'Will be ready in ~30–60s', 'info');
+  toast('Rescanning photo folders', 'The year and date filters will be ready in a few minutes', 'info');
   // Poll until ready
   const poll = setInterval(async () => {
     await fetchYears();
@@ -1500,8 +1508,9 @@ window.addEventListener('load', () => {
       syncSummary.textContent = `Last sync: ${last.toLocaleString()} · ${data.total} total entries`;
 
       const html = entries.slice(0, 30).map(e => {
-        const icon = e.action === 'synced' ? '✓' : '✕';
-        const cls = e.action === 'synced' ? 'color:#16a34a' : 'color:#dc2626';
+        const icon = e.action === 'synced' ? '✓' : e.action === 'trashed' ? '🗑' : '✕';
+        const cls = e.action === 'synced' ? 'color:#16a34a'
+                  : e.action === 'trashed' ? 'color:#b45309' : 'color:#dc2626';
         const name = e.filename || '?';
         const folder = e.folder || '';
         const time = fmtSyncDate(e.timestamp);
@@ -1549,6 +1558,13 @@ window.addEventListener('load', () => {
   }
 
   syncNowBtn.addEventListener('click', triggerSync);
+  fetch('/api/sync/status').then(r => r.json()).then(st => {
+    if (!st.enabled) {
+      syncNowBtn.disabled = true;
+      syncNowBtn.title = 'Photo sync is turned off in the admin page';
+    }
+    if (st.running) syncRunInd.style.display = '';
+  }).catch(() => {});
   fetchSyncLog();
   setInterval(fetchSyncLog, 120000);
 });

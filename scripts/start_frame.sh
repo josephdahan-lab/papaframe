@@ -151,6 +151,9 @@ FILTERED_LIST="/tmp/frame_filtered_list.txt"
 # Set by atomic_shuffle when it rebuilt SOURCE_FILE from disk (full rescan).
 # The monitor loop sees this and kicks fbi so the new list becomes visible.
 RESCAN_FLAG="/tmp/frame_rescan_reload"
+# Written by the server after a filter change or a photo-library rebuild:
+# reshuffle LIVE_LIST and relaunch the viewer so the change shows right away.
+RESHUFFLE_REQUEST="/tmp/frame_reshuffle_request"
 
 rm -f "$STOP_FLAG"
 
@@ -175,6 +178,10 @@ atomic_shuffle() {
     if [ -f "$LOCATION_FILTER" ] && [ -f "$FILTERED_LIST" ]; then
         shuf "$FILTERED_LIST" > "$tmp"
         echo "Shuffled $(wc -l < "$tmp") photos for location $(cat "$LOCATION_FILTER" 2>/dev/null)"
+    elif [[ "$filter" =~ ^last[0-9]+m$ ]] && [ -f "$FILTERED_LIST" ]; then
+        # "Last N months": the server pre-writes FILTERED_LIST from photo dates.
+        shuf "$FILTERED_LIST" > "$tmp"
+        echo "Shuffled $(wc -l < "$tmp") photos for $filter"
     elif [[ "$filter" =~ ^(19|20)[0-9]{2}$ ]]; then
         # Year-filtered shuffle: grep paths that contain /YYYY/ or YYYY anywhere
         if [ -f "$SOURCE_FILE" ]; then
@@ -341,6 +348,12 @@ while true; do
         CUR_DURATION="${DURATION:-5}"
     fi
 
+    # Filter changed or photo list rebuilt? Reshuffle before relaunching.
+    if [ -f "$RESHUFFLE_REQUEST" ]; then
+        rm -f "$RESHUFFLE_REQUEST"
+        atomic_shuffle
+    fi
+
     # Rotate list to resume photo (if set by server before kill/stop)
     rotate_to_resume
 
@@ -441,6 +454,15 @@ while true; do
             rm -f "$STOP_FLAG"
             kill "$RESHUFFLE_BG_PID" 2>/dev/null
             exit 0
+        fi
+
+        # Server asked for a reshuffle (filter change / rebuilt library)?
+        # Restart the viewer; the outer loop reshuffles before relaunching.
+        if [ -f "$RESHUFFLE_REQUEST" ]; then
+            echo "Reshuffle requested — restarting viewer."
+            kill "$VIEWER_PID" 2>/dev/null
+            wait "$VIEWER_PID" 2>/dev/null
+            break
         fi
 
         # Rescan rebuilt the master list? Restart viewer so the new list is loaded.
