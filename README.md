@@ -52,9 +52,10 @@ page can edit in place.
   network shares where files come and go.
 - Resume position when duration changes mid-show, so the viewer doesn't snap
   back to photo #1 every time you tweak the speed.
-- Year filter (`/2017/`-style path matching), **Last month / Last 3 months /
-  Last 6 months** filters (by date taken), and country filter (reverse-
-  geocoded from photo GPS).
+- Date filters that combine: any mix of years (`/2017/`-style path
+  matching), **Last month / Last 3 months / Last 6 months** (by date taken)
+  and **Scans** shows every photo matching at least one of them. Plus a
+  country filter (reverse-geocoded from photo GPS).
 
 **Photo Sync**
 - Nightly sync from a NAS (or any mounted source) to local USB storage, run by
@@ -200,6 +201,7 @@ when moving PapaFrame to a different frame.
 | `LOG_FILE`           | Server log path (relative paths anchor at repo root) | `frame_display.log`                |
 | `LOG_MAX_MB`         | Rotate the server log at this size                   | `10`                               |
 | `LOG_BACKUPS`        | Rotated server logs to keep                          | `3`                                |
+| `SCANS_DIR`          | Folder(s) for the Scans filter (`auto` = `Scans…` folders in `PHOTO_DIRS`) | `auto` |
 | `SYNC_ENABLED`       | `no` turns photo sync off completely                 | `yes`                              |
 | `SYNC_TIME`          | Nightly sync time (HH:MM, 24h)                       | `03:00`                            |
 | `SYNC_MAX_WIDTH`     | Synced photos fit within this width                  | `1920`                             |
@@ -358,9 +360,11 @@ script against.
 - `GET  /api/photo/thumb?path=…` — JPEG thumbnail.
 
 **Filters**
-- `GET  /api/years` — year buckets plus `recent` ("last N months") counts.
-- `POST /api/setfilter` — `{ "year": 2018 }`, `{ "year": "last3m" }`
-  (`last1m` / `last3m` / `last6m`), or `{ "year": null }` to clear.
+- `GET  /api/years` — year buckets, `recent` ("last N months") and `scans`
+  counts, and the active `filters`.
+- `POST /api/setfilter` — `{ "filters": ["2005", "last1m", "scans"] }` shows
+  photos matching any of them; `{ "filters": [] }` clears. The older
+  `{ "year": 2018 }` form still sets a single filter.
 - `POST /api/rebuildyears` — rescan the photo folders and rebuild the indexes.
 - `GET  /api/locations` — countries present in the library.
 - `POST /api/setlocationfilter` — `{ "country": "FR" }`
@@ -430,6 +434,15 @@ and the `cache/` folder holding cached photos + `manifest.tsv`).
 ---
 
 ## Changelog
+
+### v2.2.0
+
+- **Combinable date filters**: select several years, Last month / 3 / 6
+  months and the new **Scans** filter together — the slideshow shows photos
+  matching any of them. Picks made within a second apply as one reshuffle.
+- **Scans filter** for scanned photos (`SCANS_DIR`, auto-detected).
+- Restarting the web server no longer stops the slideshow
+  (`KillMode=process`), and only one photo sync can run at a time.
 
 ### v2.1.0
 

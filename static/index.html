@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PapaFrame</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="style.css?v=2.1.0">
+  <link rel="stylesheet" href="style.css?v=2.2.0">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -294,7 +294,7 @@
   <!-- ── Year Filter ── -->
   <div class="card year-filter-card" id="year-filter-card">
     <div class="year-filter-header">
-      <span class="section-title" style="margin:0">Filter by Year</span>
+      <span class="section-title" style="margin:0">Filter by Date</span>
       <span class="year-filter-status" id="year-filter-status"></span>
       <button class="btn-secondary year-rebuild-btn" id="year-rebuild-btn"
               title="Rescan the photo folders and rebuild the year and date filters">↺ Rebuild index</button>
@@ -774,7 +774,7 @@ document.getElementById('schedule-toggle').addEventListener('change', async (e) 
 document.getElementById('schedule-save-btn').addEventListener('click', saveSchedule);
 
 // ── Year filter ─────────────────────────────────────────────────────────
-let _yearActive = null;   // currently active year filter (null = all)
+let _yearActive = [];     // selected filter keys: '2005', 'last3m', 'scans' ([] = all)
 let _yearReady  = false;  // index built?
 
 function fmtCount(n) {
@@ -782,41 +782,55 @@ function fmtCount(n) {
   return String(n);
 }
 
-// A filter is a year (number), a "last N months" key ('last3m'), or null.
-function yearBtn(filter, label, count, active) {
+// Filters combine: the slideshow shows photos matching ANY selected button
+// (years, "last N months", scans). "All Photos" clears the selection.
+let _yearLabels = {};     // key -> label, for the status line
+let _filterTimer = null;
+
+function yearBtn(key, label, count, extraClass) {
   const btn = document.createElement('button');
-  btn.className = 'year-btn' + (active === filter ? ' year-btn-active' : '');
-  btn.dataset.filter = filter === null ? '' : String(filter);
+  btn.className = 'year-btn' + (extraClass ? ' ' + extraClass : '');
+  btn.dataset.filter = key;
   btn.innerHTML = `<span class="year-btn-label">${label}</span><span class="year-btn-count">${fmtCount(count)}</span>`;
-  btn.addEventListener('click', () => doSetFilter(filter, label));
+  btn.addEventListener('click', () => toggleFilter(key));
   return btn;
 }
 
-function renderYearButtons(years, recent, active, total) {
+function renderYearButtons(d) {
   const container = document.getElementById('year-buttons');
   container.innerHTML = '';
-  container.appendChild(yearBtn(null, 'All Photos', total, active));
-  (recent || []).forEach(({key, label, count}) => {
-    const btn = yearBtn(key, label, count, active);
-    btn.classList.add('year-btn-recent');
+  _yearLabels = {};
+  container.appendChild(yearBtn('', 'All Photos', d.total || 0));
+  const specials = [...(d.recent || []), ...(d.scans ? [d.scans] : [])];
+  specials.forEach(({key, label, count}) => {
+    _yearLabels[key] = key === 'scans' ? 'scans' : label.toLowerCase();
+    const btn = yearBtn(key, label, count, 'year-btn-recent');
     if (!count) btn.disabled = true;
     container.appendChild(btn);
   });
-  years.forEach(({year, count}) => container.appendChild(yearBtn(year, String(year), count, active)));
+  d.years.forEach(({year, count}) => {
+    _yearLabels[String(year)] = String(year);
+    container.appendChild(yearBtn(String(year), String(year), count));
+  });
+  markActiveFilters();
 }
 
-function filterLabel(active, recent) {
-  const r = (recent || []).find(x => x.key === active);
-  return r ? r.label.toLowerCase() : String(active);
+function markActiveFilters() {
+  document.querySelectorAll('#year-buttons .year-btn').forEach(b => {
+    const key = b.dataset.filter;
+    b.classList.toggle('year-btn-active',
+      key === '' ? _yearActive.length === 0 : _yearActive.includes(key));
+  });
 }
 
-function updateYearStatus(label, count) {
+function updateYearStatus(count) {
   const el = document.getElementById('year-filter-status');
-  if (label) {
-    el.textContent = count ? `Showing ${label} — ${fmtCount(count)} photos` : `Showing ${label} only`;
+  if (_yearActive.length) {
+    const names = _yearActive.map(k => _yearLabels[k] || k).join(' + ');
+    el.textContent = count != null ? `Showing ${names} — ${fmtCount(count)} photos` : `Showing ${names}`;
     el.className = 'year-filter-status active';
   } else {
-    el.textContent = 'All years';
+    el.textContent = 'All photos';
     el.className = 'year-filter-status';
   }
 }
@@ -824,53 +838,61 @@ function updateYearStatus(label, count) {
 async function fetchYears() {
   try {
     const d = await fetch('/api/years').then(r => r.json());
-    _yearActive = d.active;
-    _yearReady  = d.ready;
+    _yearReady = d.ready;
+    if (!_filterTimer) _yearActive = (d.filters || []).map(String);
     if (d.years.length > 0) {
-      renderYearButtons(d.years, d.recent, d.active, d.total || 0);
+      renderYearButtons(d);
     } else if (!d.ready) {
       document.getElementById('year-buttons').innerHTML =
         '<span class="year-loading">Building year index… check back in a moment.</span>';
     }
-    const entry = d.active === null ? null
-      : (d.recent || []).find(r => r.key === d.active) || d.years.find(y => y.year === d.active);
-    updateYearStatus(d.active === null ? null : filterLabel(d.active, d.recent),
-                     entry ? entry.count : null);
+    // A single filter's count is on its button; combined counts come from setfilter.
+    let count = null;
+    if (_yearActive.length === 1) {
+      const btn = document.querySelector(`#year-buttons .year-btn[data-filter="${_yearActive[0]}"] .year-btn-count`);
+      if (btn) count = btn.textContent;
+    }
+    updateYearStatus(count);
   } catch(e) { console.error('years:', e); }
 }
 
-async function doSetFilter(filter, label) {
-  // Optimistically update UI immediately
-  _yearActive = filter;
-  const want = filter === null ? '' : String(filter);
-  let selectedCount = null;
-  document.querySelectorAll('#year-buttons .year-btn').forEach(b => {
-    const isActive = b.dataset.filter === want;
-    b.classList.toggle('year-btn-active', isActive);
-    if (isActive && filter !== null) {
-      const countEl = b.querySelector('.year-btn-count');
-      if (countEl) selectedCount = countEl.textContent;
-    }
-  });
-  const shown = filter === null ? null : (typeof filter === 'number' ? label : label.toLowerCase());
-  updateYearStatus(shown, selectedCount);
+function toggleFilter(key) {
+  if (key === '') {
+    _yearActive = [];
+  } else if (_yearActive.includes(key)) {
+    _yearActive = _yearActive.filter(k => k !== key);
+  } else {
+    _yearActive = [..._yearActive, key];
+  }
+  markActiveFilters();
+  updateYearStatus(null);
+  // Let several buttons be picked before the slideshow reshuffles.
+  clearTimeout(_filterTimer);
+  _filterTimer = setTimeout(applyFilters, key === '' ? 0 : 1200);
+}
 
+async function applyFilters() {
+  const filters = [..._yearActive];
   try {
     const res  = await fetch('/api/setfilter', {
       method:  'POST',
       headers: {'Content-Type': 'application/json'},
-      body:    JSON.stringify({ year: filter }),
+      body:    JSON.stringify({ filters }),
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    if (filter !== null) {
-      toast(`Filtering to ${shown}`, `Reshuffling slideshow with ${selectedCount || ''} matching photos`, 'success');
+    _filterTimer = null;
+    updateYearStatus(data.count);
+    fetchLocations();   // a date filter clears the location filter
+    if (filters.length) {
+      const names = filters.map(k => _yearLabels[k] || k).join(' + ');
+      toast(`Showing ${names}`, `Reshuffling slideshow with ${fmtCount(data.count)} photos`, 'success');
     } else {
       toast('All photos', 'Reshuffling slideshow with entire library', 'success');
     }
-    // Re-fetch status after the viewer restarts
     setTimeout(fetchStatus, 4000);
   } catch(e) {
+    _filterTimer = null;
     toast('Filter failed', e.message, 'error');
     fetchYears();
   }

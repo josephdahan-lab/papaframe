@@ -178,8 +178,9 @@ atomic_shuffle() {
     if [ -f "$LOCATION_FILTER" ] && [ -f "$FILTERED_LIST" ]; then
         shuf "$FILTERED_LIST" > "$tmp"
         echo "Shuffled $(wc -l < "$tmp") photos for location $(cat "$LOCATION_FILTER" 2>/dev/null)"
-    elif [[ "$filter" =~ ^last[0-9]+m$ ]] && [ -f "$FILTERED_LIST" ]; then
-        # "Last N months": the server pre-writes FILTERED_LIST from photo dates.
+    elif [ -n "$filter" ] && [ -f "$FILTERED_LIST" ]; then
+        # Date filters (years, "last N months", scans — combinable): the
+        # server pre-writes FILTERED_LIST with every photo matching any of them.
         shuf "$FILTERED_LIST" > "$tmp"
         echo "Shuffled $(wc -l < "$tmp") photos for $filter"
     elif [[ "$filter" =~ ^(19|20)[0-9]{2}$ ]]; then

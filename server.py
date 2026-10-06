@@ -117,6 +117,9 @@ CONFIG_SCHEMA = [
     ('SHARED_LOCATION_CACHE', 'str', 'Shared location cache',
      '"auto" looks at <photo-dir-mount>/.papaframe/location_cache.tsv. '
      'Explicit path uses that file. Empty / "no" disables sharing (each Pi scans alone).'),
+    ('SCANS_DIR',         'str', 'Scans folder',
+     'Folder(s) for the "Scans" filter, colon-separated. "auto" = any folder '
+     'named Scans… directly inside the photo folders.'),
     # Photo sync — shown in the admin page's Photo Sync section, read fresh
     # on every run so changes apply without a restart.
     ('SYNC_ENABLED',      'bool', 'Photo sync',
@@ -502,15 +505,25 @@ def get_slideshow_state():
         pass
     return {}
 
+def get_active_filters():
+    """Selected date filters, combinable: years ('2005'), "last N months"
+    keys ('last3m') and 'scans'. A photo is shown if it matches any of them.
+    Stored comma-separated in YEAR_FILTER; [] means no filter."""
+    val = _read_file(YEAR_FILTER).replace(' ', '')
+    return [t for t in val.split(',') if _valid_filter(t)] if val else []
+
+def _valid_filter(token):
+    return (token == SCANS_KEY or token in RECENT_FILTERS
+            or (token.isdigit() and len(token) == 4))
+
 def get_current_year_filter():
-    """Read the active date filter: a year (int), a "last N months" key
-    such as 'last3m' (str), or None."""
-    val = _read_file(YEAR_FILTER)
-    if val and val.isdigit() and len(val) == 4:
-        return int(val)
-    if val in RECENT_FILTERS:
-        return val
-    return None
+    """Single active filter in the pre-2.2 API shape — a year (int) or key
+    (str) — for clients that only know one filter at a time. A list when
+    several are combined, None when there is no filter."""
+    tokens = get_active_filters()
+    if len(tokens) == 1:
+        return int(tokens[0]) if tokens[0].isdigit() else tokens[0]
+    return tokens or None
 
 def get_current_location_filter():
     """Read the active location filter (country code or NO_LOC) or None."""
@@ -701,8 +714,25 @@ RECENT_FILTERS = {                          # key: (months, label)
 FNAME_DATE_RE = re.compile(
     r'(?<!\d)((?:19|20)\d{2})[-_]?(0[1-9]|1[0-2])[-_]?(0[1-9]|[12]\d|3[01])(?!\d)')
 PATH_YM_RE = re.compile(r'/((?:19|20)\d{2})[-_/](0[1-9]|1[0-2])(?=/)')
+SCANS_KEY = 'scans'
 _library_lock = threading.Lock()
-_recent_cache = {'at': 0.0, 'counts': {}}
+_filter_cache = {'at': 0.0, 'counts': {}}
+
+def _scans_prefixes():
+    """Folder prefixes ('/…/Scans-small/') that the Scans filter covers."""
+    raw = load_config(CONFIG_PATH).get('SCANS_DIR', 'auto').strip()
+    if raw and raw.lower() != 'auto':
+        return tuple(os.path.join(os.path.expandvars(os.path.expanduser(p)).rstrip('/'), '')
+                     for p in raw.split(':') if p)
+    found = []
+    for root in _photo_dirs():
+        try:
+            for entry in os.scandir(root):
+                if entry.is_dir() and entry.name.lower().startswith('scans'):
+                    found.append(os.path.join(entry.path, ''))
+        except OSError:
+            continue
+    return tuple(found)
 
 def _photo_date(path, mtime):
     """Best-guess 'YYYYMMDD' the photo was taken (see PHOTO_DATES above)."""
@@ -775,10 +805,10 @@ def rebuild_photo_library():
                     f'{time.time() - started:.0f}s')
         build_year_index()
         build_location_index(allow_scan=False)
-        _recent_cache['at'] = 0.0
-        active = get_current_year_filter()
-        if isinstance(active, str):
-            _write_recent_list(active)
+        _filter_cache['at'] = 0.0
+        tokens = get_active_filters()
+        if tokens:
+            _write_filter_list(_filter_paths(tokens))
         _write_file(RESHUFFLE_REQUEST, '1')
         return True
     except Exception as e:
@@ -799,6 +829,12 @@ def _months_ago(months):
             continue
 
 def _iter_photo_dates():
+    """(path, 'YYYYMMDD') for every photo. Falls back to the plain photo
+    list (no dates) until the first library rebuild has written PHOTO_DATES."""
+    if not PHOTO_DATES.exists():
+        for p in _iter_photo_paths():
+            yield p, ''
+        return
     try:
         with PHOTO_DATES.open('r', encoding='utf-8', errors='replace') as f:
             for line in f:
@@ -808,25 +844,37 @@ def _iter_photo_dates():
     except OSError:
         return
 
-def recent_counts():
-    """{key: photo count} for each "last N months" filter (cached 10 min)."""
-    if time.time() - _recent_cache['at'] < 600:
-        return _recent_cache['counts']
+def filter_counts():
+    """{key: photo count} for each "last N months" filter and for 'scans'
+    (cached 10 min)."""
+    if time.time() - _filter_cache['at'] < 600:
+        return _filter_cache['counts']
     cutoffs = {k: _months_ago(n) for k, (n, _l) in RECENT_FILTERS.items()}
-    counts = dict.fromkeys(RECENT_FILTERS, 0)
-    for _p, date in _iter_photo_dates():
+    scans = _scans_prefixes()
+    counts = dict.fromkeys([*RECENT_FILTERS, SCANS_KEY], 0)
+    for path, date in _iter_photo_dates():
         for k, c in cutoffs.items():
             if date >= c:
                 counts[k] += 1
-    _recent_cache.update(at=time.time(), counts=counts)
+        if scans and path.startswith(scans):
+            counts[SCANS_KEY] += 1
+    _filter_cache.update(at=time.time(), counts=counts)
     return counts
 
-def _write_recent_list(key):
-    """Write the photos taken in the last N months to FILTERED_LIST."""
-    cutoff = _months_ago(RECENT_FILTERS[key][0])
-    paths = [p for p, d in _iter_photo_dates() if d >= cutoff]
+def _filter_paths(tokens):
+    """Photos matching any of the filter tokens (years, last N months,
+    scans) — the union, so filters can be combined."""
+    years = [f'/{t}/' for t in tokens if t.isdigit()]
+    months = [RECENT_FILTERS[t][0] for t in tokens if t in RECENT_FILTERS]
+    cutoff = _months_ago(max(months)) if months else None
+    scans = _scans_prefixes() if SCANS_KEY in tokens else ()
+    return [p for p, d in _iter_photo_dates()
+            if (cutoff and d >= cutoff)
+            or (scans and p.startswith(scans))
+            or any(y in p for y in years)]
+
+def _write_filter_list(paths):
     FILTERED_LIST.write_text('\n'.join(paths) + ('\n' if paths else ''))
-    return len(paths)
 
 # ── Location index ────────────────────────────────────────────────
 # Caches a country code per photo so we can filter the slideshow by country.
@@ -2254,44 +2302,52 @@ def api_years():
         key=lambda x: x['year'], reverse=True,
     )
     total = sum(x['count'] for x in years)
-    counts = recent_counts()
+    counts = filter_counts()
     recent = [{'key': k, 'label': label, 'count': counts.get(k, 0)}
               for k, (_n, label) in RECENT_FILTERS.items()]
+    scans = ({'key': SCANS_KEY, 'label': 'Scans', 'count': counts[SCANS_KEY]}
+             if counts.get(SCANS_KEY) else None)
     return jsonify({
         'years': years,
         'recent': recent,
+        'scans': scans,
         'total': total,
+        'filters': get_active_filters(),
         'active': get_current_year_filter(),
         'ready': state['year_index_ready'],
     })
 
 @app.route('/api/setfilter', methods=['POST'])
 def api_setfilter():
-    """Set year filter via control file. The bash script reads it on next reshuffle,
-    and we kill fbi so the bash loop reshuffles immediately."""
-    data = request.json or {}
-    year = data.get('year')
-    if year is not None and str(year) not in RECENT_FILTERS and not (
-            str(year).isdigit() and len(str(year)) == 4):
-        return jsonify({'error': f'Unknown filter: {year}'}), 400
-
-    # Year, recent and location filters are mutually exclusive.
-    LOCATION_FILTER.unlink(missing_ok=True)
-    FILTERED_LIST.unlink(missing_ok=True)
-
-    if year in RECENT_FILTERS:
-        count = _write_recent_list(year)
-        if count == 0:
-            FILTERED_LIST.unlink(missing_ok=True)
-            return jsonify({'error': f'No photos from the {RECENT_FILTERS[year][1].lower()}'}), 400
-        _write_file(YEAR_FILTER, year)
-    elif year:
-        _write_file(YEAR_FILTER, year)
+    """Set the combined date filters: {"filters": ["2005", "last1m", "scans"]}
+    shows photos matching any of them; [] clears. The legacy {"year": X}
+    form sets a single filter. The slideshow reshuffles right away."""
+    data = request.get_json(silent=True) or {}
+    if 'filters' in data:
+        tokens = [str(t) for t in (data.get('filters') or [])]
     else:
+        year = data.get('year')
+        tokens = [] if year in (None, '') else [str(year)]
+    tokens = list(dict.fromkeys(tokens))
+    bad = [t for t in tokens if not _valid_filter(t)]
+    if bad:
+        return jsonify({'error': f'Unknown filter: {", ".join(bad)}'}), 400
+
+    paths = _filter_paths(tokens) if tokens else []
+    if tokens and not paths:
+        return jsonify({'error': 'No photos match that selection'}), 400
+
+    # Date filters and the location filter are mutually exclusive.
+    LOCATION_FILTER.unlink(missing_ok=True)
+    if tokens:
+        _write_filter_list(paths)
+        _write_file(YEAR_FILTER, ','.join(tokens))
+    else:
+        FILTERED_LIST.unlink(missing_ok=True)
         YEAR_FILTER.unlink(missing_ok=True)
     _write_file(RESHUFFLE_REQUEST, '1')
 
-    # Kill fbi so the bash script reshuffles with the new filter
+    # Kill the viewer so start_frame.sh reshuffles with the new filter
     viewer_pid = get_viewer_pid()
     if viewer_pid:
         try:
@@ -2299,8 +2355,9 @@ def api_setfilter():
         except Exception:
             pass
 
-    logger.info(f'Year filter set to {year}')
-    return jsonify({'success': True})
+    logger.info(f'Date filters set to {tokens or "none"} ({len(paths)} photos)')
+    return jsonify({'success': True, 'filters': tokens,
+                    'count': len(paths) if tokens else None})
 
 @app.route('/api/rebuildyears', methods=['POST'])
 def api_rebuildyears():
@@ -2606,12 +2663,30 @@ def _load_sync_log():
     data = _load_json_file(SYNC_LOG_FILE, [])
     return data if isinstance(data, list) else []
 
+def _orphan_sync_running():
+    """True if a photo_sync.py this server did not start is running — e.g.
+    one that kept going across a server restart (KillMode=process)."""
+    me = os.getpid()
+    for proc in psutil.process_iter(['pid', 'ppid', 'cmdline']):
+        try:
+            cmd = proc.info.get('cmdline') or []
+            if (proc.info['ppid'] != me and len(cmd) >= 2
+                    and 'python' in os.path.basename(cmd[0])
+                    and cmd[1].endswith('scripts/photo_sync.py')):
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return False
+
+def _current_sync_job():
+    return _sync_job or ('sync' if _orphan_sync_running() else None)
+
 def _start_sync_job(kind, approve_trash=()):
     """Run photo_sync.py in a background thread. kind is 'sync' or
     'preview'. Returns False if a job is already running."""
     global _sync_job
     with _sync_lock:
-        if _sync_job:
+        if _sync_job or _orphan_sync_running():
             return False
         _sync_job = kind
 
@@ -2704,14 +2779,14 @@ def api_sync_run():
     known = {f['destination'] for f in _load_sync_config()}
     approve = [d for d in data.get('approve_trash', []) if d in known]
     if not _start_sync_job('sync', approve_trash=approve):
-        return jsonify({'error': f'A photo {_sync_job} is already running'}), 409
+        return jsonify({'error': f'A photo {_current_sync_job()} is already running'}), 409
     return jsonify({'success': True, 'message': 'Sync started in background'})
 
 @app.route('/api/sync/preview', methods=['POST'])
 def api_sync_preview_run():
     """Compare source and frame without changing anything."""
     if not _start_sync_job('preview'):
-        return jsonify({'error': f'A photo {_sync_job} is already running'}), 409
+        return jsonify({'error': f'A photo {_current_sync_job()} is already running'}), 409
     return jsonify({'success': True})
 
 @app.route('/api/sync/preview', methods=['GET'])
@@ -2723,9 +2798,10 @@ def api_sync_preview_get():
 def api_sync_status():
     cfg = _sync_settings()
     last = _load_json_file(SYNC_LAST_RUN_FILE, None)
+    job = _current_sync_job()
     return jsonify({
-        'running': _sync_job == 'sync',
-        'job': _sync_job,
+        'running': job == 'sync',
+        'job': job,
         'enabled': cfg['enabled'],
         'time': f'{cfg["time"][0]:02d}:{cfg["time"][1]:02d}',
         'last_run': {'finished_at': last.get('finished_at'),
@@ -2768,7 +2844,7 @@ def api_sync_trash():
 @app.route('/api/sync/trash/delete', methods=['POST'])
 def api_sync_trash_delete():
     """Permanently delete trashed photos ({ids: [...]} or {all: true})."""
-    if _sync_job == 'sync':
+    if _current_sync_job() == 'sync':
         return jsonify({'error': 'Wait for the running sync to finish'}), 409
     entries = _load_json_file(SYNC_TRASH_FILE, [])
     chosen, kept = _trash_select(entries, request.get_json(silent=True) or {})
@@ -2789,7 +2865,7 @@ def api_sync_trash_delete():
 def api_sync_trash_restore():
     """Move trashed photos back to where they were. A photo that is still
     missing from the source will be trashed again by the next sync."""
-    if _sync_job == 'sync':
+    if _current_sync_job() == 'sync':
         return jsonify({'error': 'Wait for the running sync to finish'}), 409
     entries = _load_json_file(SYNC_TRASH_FILE, [])
     chosen, kept = _trash_select(entries, request.get_json(silent=True) or {})

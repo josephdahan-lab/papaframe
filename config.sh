@@ -24,6 +24,10 @@
 #PHOTO_DIRS="$HOME/Pictures"
 PHOTO_DIRS="/mnt/usb/Pictures"
 
+# Folder(s) for the dashboard's "Scans" filter, colon-separated. "auto"
+# picks any folder named Scans… directly inside the photo folders.
+SCANS_DIR="auto"
+
 # ── Photo cache ───────────────────────────────────────────────────
 # PapaFrame can keep a local cache of upcoming photos, resized down to
 # the display. The slideshow shows cached copies when they exist and
