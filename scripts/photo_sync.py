@@ -32,6 +32,7 @@ Every action is logged to sync_log.json (entries older than a year are
 pruned). Progress is flushed every 25 files so the dashboard stays current.
 """
 
+import fcntl
 import json
 import os
 import shutil
@@ -55,6 +56,7 @@ SYNC_CONFIG = PROJECT_DIR / 'sync_config.json'
 SYNC_LOG = PROJECT_DIR / 'sync_log.json'
 SYNC_PREVIEW = PROJECT_DIR / 'sync_preview.json'
 SYNC_TRASH = PROJECT_DIR / 'sync_trash.json'
+SYNC_LOCK = PROJECT_DIR / '.sync.lock'
 
 IMAGE_EXTENSIONS = {
     '.jpg', '.jpeg', '.png', '.bmp', '.gif',
@@ -403,6 +405,14 @@ def main():
     args = parser.parse_args()
 
     mode = 'Preview' if args.preview else 'Sync'
+    # One run at a time: the server can be restarted while a sync it started
+    # keeps running (KillMode=process), and must not start a second one.
+    lock = open(SYNC_LOCK, 'w')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print(f'Another photo sync is already running — {mode.lower()} skipped.')
+        sys.exit(0)
     print(f'PapaFrame Photo {mode} — {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
     print(f'Config: {SYNC_CONFIG}   HEIC support: {"yes" if HEIF_SUPPORTED else "no"}')
 

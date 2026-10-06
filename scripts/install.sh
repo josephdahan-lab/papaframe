@@ -305,6 +305,9 @@ WorkingDirectory=$REPO_ROOT
 ExecStart=$PYTHON_BIN $REPO_ROOT/$SERVER_SCRIPT
 Restart=on-failure
 RestartSec=5
+# Restarting the web server must not kill the slideshow (start_frame.sh)
+# or a running photo sync, which it launches as child processes.
+KillMode=process
 $MEMORY_LIMITS
 
 [Install]

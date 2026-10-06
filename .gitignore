@@ -23,6 +23,7 @@ sync_preview.json
 sync_last_run.json
 sync_trash.json
 .sync_schedule.json
+.sync.lock
 .sync_state.json
 .sync_last_run
 
