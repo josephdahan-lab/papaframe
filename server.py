@@ -1302,69 +1302,95 @@ _dpms_lock = threading.Lock()
 # DPMS stays Off.  When the process dies the fd auto-closes and the
 # driver resets DPMS to On — which is exactly what we want.
 _DPMS_OFF_SCRIPT = r'''
-import os, signal, sys, time, ctypes, fcntl, struct
+import glob, os, signal, sys, time, ctypes, fcntl
 
-fd = os.open("/dev/dri/card0", os.O_RDWR)
+# Find the DRM card and connector that drive the display, rather than
+# hard-coding them: on a Pi 4/5 card0 is the v3d render-only device and
+# the HDMI output lives on card1, on whichever HDMI port is plugged in.
+libdrm = ctypes.CDLL("libdrm.so.2")
+
+class drmModeRes(ctypes.Structure):
+    _fields_ = [
+        ("count_fbs", ctypes.c_int), ("fbs", ctypes.c_void_p),
+        ("count_crtcs", ctypes.c_int), ("crtcs", ctypes.c_void_p),
+        ("count_connectors", ctypes.c_int), ("connectors", ctypes.c_void_p),
+        ("count_encoders", ctypes.c_int), ("encoders", ctypes.c_void_p),
+        ("min_width", ctypes.c_uint32), ("max_width", ctypes.c_uint32),
+        ("min_height", ctypes.c_uint32), ("max_height", ctypes.c_uint32),
+    ]
+
+class drmModeConnector(ctypes.Structure):
+    _fields_ = [
+        ("connector_id", ctypes.c_uint32),
+        ("encoder_id", ctypes.c_uint32),
+        ("connector_type", ctypes.c_uint32),
+        ("connector_type_id", ctypes.c_uint32),
+        ("connection", ctypes.c_uint32),     # 1 = connected
+        ("mmWidth", ctypes.c_uint32),
+        ("mmHeight", ctypes.c_uint32),
+        ("subpixel", ctypes.c_uint32),
+        ("count_modes", ctypes.c_int),
+        ("modes", ctypes.c_void_p),
+        ("count_props", ctypes.c_int),
+        ("props", ctypes.c_void_p),          # uint32_t *
+        ("prop_values", ctypes.c_void_p),    # uint64_t *
+        ("count_encoders", ctypes.c_int),
+        ("encoders", ctypes.c_void_p),
+    ]
+
+libdrm.drmModeGetResources.restype = ctypes.POINTER(drmModeRes)
+libdrm.drmModeGetConnector.restype = ctypes.POINTER(drmModeConnector)
+libdrm.drmModeGetProperty.restype = ctypes.c_void_p
+
+def u32_at(ptr, i):
+    return ctypes.cast(ptr + i * 4, ctypes.POINTER(ctypes.c_uint32))[0]
+
+def dpms_prop(fd, conn):
+    # drmModePropertyRes starts with prop_id(4) + flags(4) + name[32]
+    for i in range(conn.count_props):
+        pid = u32_at(conn.props, i)
+        pp = libdrm.drmModeGetProperty(fd, pid)
+        if pp:
+            name = ctypes.string_at(pp + 8, 32).split(b"\x00")[0]
+            libdrm.drmModeFreeProperty(ctypes.c_void_p(pp))
+            if name == b"DPMS":
+                return pid
+    return None
+
+def find_display():
+    # Returns (fd, connector_id, dpms_prop_id) for the first connected
+    # connector that has a DPMS property, keeping that card's fd open.
+    for path in sorted(glob.glob("/dev/dri/card[0-9]*")):
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError:
+            continue
+        res = libdrm.drmModeGetResources(fd)
+        if res:
+            r = res.contents
+            for i in range(r.count_connectors):
+                cid = u32_at(r.connectors, i)
+                cp = libdrm.drmModeGetConnector(fd, cid)
+                if not cp:
+                    continue
+                connected = cp.contents.connection == 1
+                pid = dpms_prop(fd, cp.contents) if connected else None
+                libdrm.drmModeFreeConnector(cp)
+                if pid is not None:
+                    libdrm.drmModeFreeResources(res)
+                    return fd, cid, pid
+            libdrm.drmModeFreeResources(res)
+        os.close(fd)
+    return None, None, None
+
+fd, CONN_ID, dpms_id = find_display()
+if fd is None:
+    sys.stderr.write("dpms-helper: no connected display with a DPMS property\n")
+    sys.exit(1)
 try:
     fcntl.ioctl(fd, 0x0000641e, 0)       # DRM_IOCTL_SET_MASTER
 except OSError:
     pass
-
-libdrm = ctypes.CDLL("libdrm.so.2")
-
-# Use drmModeConnectorSetProperty directly — prop_id 2 is DPMS on
-# every vc4 Pi we've tested.  As a safety check, verify via
-# drmModeObjectGetProperties first.
-libdrm.drmModeObjectGetProperties.restype = ctypes.c_void_p
-libdrm.drmModeGetProperty.restype = ctypes.c_void_p
-
-# Find DPMS property ID the safe way (no manual struct-offset parsing)
-def find_dpms(fd, conn_id):
-    """Walk connector properties to find the DPMS prop ID."""
-    # Use drmModeGetConnector which returns a fully typed struct
-    class drmModeConnector(ctypes.Structure):
-        _fields_ = [
-            ("connector_id", ctypes.c_uint32),
-            ("encoder_id", ctypes.c_uint32),
-            ("connector_type", ctypes.c_uint32),
-            ("connector_type_id", ctypes.c_uint32),
-            ("connection", ctypes.c_uint32),
-            ("mmWidth", ctypes.c_uint32),
-            ("mmHeight", ctypes.c_uint32),
-            ("subpixel", ctypes.c_uint32),
-            ("count_modes", ctypes.c_int),
-            ("modes", ctypes.c_void_p),
-            ("count_props", ctypes.c_int),
-            ("props", ctypes.c_void_p),       # uint32_t *
-            ("prop_values", ctypes.c_void_p), # uint64_t *
-            ("count_encoders", ctypes.c_int),
-            ("encoders", ctypes.c_void_p),
-        ]
-    libdrm.drmModeGetConnector.restype = ctypes.POINTER(drmModeConnector)
-    conn = libdrm.drmModeGetConnector(fd, conn_id)
-    if not conn:
-        return None
-    c = conn.contents
-    for i in range(c.count_props):
-        pid = ctypes.cast(c.props + i * 4,
-                          ctypes.POINTER(ctypes.c_uint32))[0]
-        pp = libdrm.drmModeGetProperty(fd, pid)
-        if pp:
-            # drmModePropertyRes: prop_id(4) + flags(4) + name(32)
-            name = ctypes.string_at(pp + 8, 32).split(b"\x00")[0]
-            libdrm.drmModeFreeProperty(pp)
-            if name == b"DPMS":
-                libdrm.drmModeFreeConnector(conn)
-                return pid
-    libdrm.drmModeFreeConnector(conn)
-    return None
-
-CONN_ID = 33
-dpms_id = find_dpms(fd, CONN_ID)
-if dpms_id is None:
-    sys.stderr.write("dpms-helper: DPMS property not found\n")
-    os.close(fd)
-    sys.exit(1)
 
 ret = libdrm.drmModeConnectorSetProperty(fd, CONN_ID, dpms_id, 3)
 if ret != 0:
@@ -1413,9 +1439,14 @@ def _set_screen(want):
                         logger.info('Screen off: DPMS helper running '
                                     f'(pid={proc.pid})')
                     else:
-                        err = proc.stderr.read().decode(errors='replace')
+                        err = proc.stderr.read().decode(errors='replace').strip()
                         proc.kill()
-                        logger.error(f'DPMS helper failed: {err}')
+                        logger.error(f'DPMS helper failed: {err} — '
+                                     'blanking via papaframe-screen instead')
+                        subprocess.run(
+                            ['sudo', '-n', '/usr/local/bin/papaframe-screen', 'off'],
+                            capture_output=True, timeout=10, check=False,
+                        )
                 except Exception as e:
                     proc.kill()
                     logger.error(f'DPMS helper start error: {e}')

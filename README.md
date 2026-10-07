@@ -435,6 +435,14 @@ and the `cache/` folder holding cached photos + `manifest.tsv`).
 
 ## Changelog
 
+### v2.2.1
+
+- **Night-time screen-off works again on Pi 4/5**: the DPMS helper was
+  hard-coded to `/dev/dri/card0` (the v3d render-only device) and HDMI
+  connector 33, so it failed every 30 s all night and the monitor stayed
+  powered on showing black. It now finds the card and the connected HDMI
+  port itself, and falls back to `papaframe-screen off` if DPMS fails.
+
 ### v2.2.0
 
 - **Combinable date filters**: select several years, Last month / 3 / 6
