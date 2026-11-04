@@ -643,7 +643,19 @@ def find_dpms(fd, conn_id):
     libdrm.drmModeFreeConnector(conn)
     return None
 
-CONN_ID = 33
+def find_hdmi_conn():
+    # The HDMI connector id differs between kernels (33 on older Pi OS,
+    # 35 on trixie), so read it from sysfs instead of hardcoding it.
+    import glob
+    for d in sorted(glob.glob("/sys/class/drm/card0-HDMI-*")):
+        try:
+            if open(d + "/status").read().strip() == "connected":
+                return int(open(d + "/connector_id").read())
+        except (OSError, ValueError):
+            pass
+    return 33
+
+CONN_ID = find_hdmi_conn()
 dpms_id = find_dpms(fd, CONN_ID)
 if dpms_id is None:
     sys.stderr.write("dpms-helper: DPMS property not found\n")

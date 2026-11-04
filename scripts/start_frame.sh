@@ -155,6 +155,15 @@ RESCAN_FLAG="/tmp/frame_rescan_reload"
 # reshuffle LIVE_LIST and relaunch the viewer so the change shows right away.
 RESHUFFLE_REQUEST="/tmp/frame_reshuffle_request"
 
+# During the scheduled screen-off window the server blanks the display and
+# stops the slideshow, but tty1 autologin relaunches this script right away.
+# Wait here instead of running a viewer on a dark screen; carry on once the
+# server clears the flag at screen-on time.
+SCHEDULE_OFF_FLAG="/tmp/frame_schedule_off"
+while [ -f "$SCHEDULE_OFF_FLAG" ]; do
+    sleep 30
+done
+
 rm -f "$STOP_FLAG"
 
 # ── Cleanup old reshuffle loop ────────────────────────────────────────────────
