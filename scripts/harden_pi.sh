@@ -7,13 +7,18 @@
 # "deferredclose" workers in uninterruptible D-state under sustained load; once
 # enough pile up the CIFS workqueue stalls and the Pi can lock up.
 #
-# This script makes three system-level changes (the indexer throttle is a
+# It also stops frames from silently dropping off Wi-Fi for good (step 4).
+#
+# This script makes four system-level changes (the indexer throttle is a
 # separate code change in server.py):
 #   1. Hardware watchdog  — a frozen Pi self-reboots instead of needing a hand.
 #   2. Persistent journald + a 1-min health sampler — so the next freeze leaves
 #      evidence (right now the journal is RAM-only and wiped on every reboot).
 #   3. CIFS closetimeo=0  — disables deferred-close handle caching, the exact
 #      mechanism whose workers were seen wedged.
+#   4. Wi-Fi resilience   — NetworkManager never stops retrying, Wi-Fi power
+#      saving is off, and a 5-min watchdog reconnects, cycles the radio, and
+#      reboots after ~1 hour offline (scripts/frame-wifi-watchdog.sh).
 #
 # Idempotent: safe to re-run. Backs up every file it edits.
 set -u
@@ -26,7 +31,7 @@ fi
 ts=$(date +%Y%m%d-%H%M%S)
 backup() { [ -f "$1" ] && cp -a "$1" "$1.papaframe-bak.$ts" && echo "  backed up $1 -> $1.papaframe-bak.$ts"; }
 
-echo "=== 1/3  Hardware watchdog ==="
+echo "=== 1/4  Hardware watchdog ==="
 # /dev/watchdog already exists on this Pi, so the bcm2835 timer is live — we
 # just tell systemd (PID 1) to pet it. If systemd ever stops being scheduled
 # (a hard freeze), the hardware resets the board after RuntimeWatchdogSec.
@@ -41,7 +46,7 @@ systemctl daemon-reexec
 sleep 1
 echo "  watchdog now: timeout=$(cat /sys/class/watchdog/watchdog0/timeout 2>/dev/null)s state=$(cat /sys/class/watchdog/watchdog0/state 2>/dev/null)"
 
-echo "=== 2/3  Persistent journald + health sampler ==="
+echo "=== 2/4  Persistent journald + health sampler ==="
 JC=/etc/systemd/journald.conf
 backup "$JC"
 sed -i 's/^#\?Storage=.*/Storage=persistent/' "$JC"
@@ -89,7 +94,7 @@ systemctl daemon-reload
 systemctl enable --now papaframe-health.timer
 echo "  health sampler armed — view with:  journalctl -t papaframe-health"
 
-echo "=== 3/3  CIFS closetimeo=0 ==="
+echo "=== 3/4  CIFS closetimeo=0 ==="
 # Deferred-close keeps file handles open briefly after close() to optimise
 # re-opens. Under our access pattern (hundreds of thousands of one-shot opens)
 # it just queues unbounded close work; closetimeo=0 makes closes synchronous so
@@ -103,9 +108,57 @@ else
     systemctl daemon-reload
 fi
 
+echo "=== 4/4  Wi-Fi resilience ==="
+# Frames kept going offline for weeks: NetworkManager gives up after 4 failed
+# reconnects (e.g. a long router outage or an overnight mesh update), Wi-Fi
+# power saving makes the brcmfmac chip drop off, and nothing ever retried.
+# The slideshow keeps running from local photos, so nobody notices.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NMCONF=/etc/NetworkManager/conf.d/99-papaframe-wifi.conf
+if [ -d /etc/NetworkManager/conf.d ]; then
+    cat > "$NMCONF" <<'EOF'
+# PapaFrame (harden_pi.sh): never stop retrying Wi-Fi, and keep power saving
+# off — the Pi's brcmfmac chip drops off the network with it on.
+[connection]
+connection.autoconnect-retries=0
+wifi.powersave=2
+EOF
+    nmcli general reload conf 2>/dev/null || true
+    echo "  wrote $NMCONF (unlimited retries, power save off)"
+else
+    echo "  NetworkManager not found — skipping retry/power-save settings"
+fi
+# The conf file applies on the next connect; turn power saving off right away.
+for dev in /sys/class/net/wlan*; do
+    [ -e "$dev" ] && iw dev "$(basename "$dev")" set power_save off 2>/dev/null \
+        && echo "  power save off on $(basename "$dev")"
+done
+
+install -m 0755 "$SCRIPT_DIR/frame-wifi-watchdog.sh" /usr/local/sbin/frame-wifi-watchdog.sh
+cat > /etc/systemd/system/frame-wifi-watchdog.service <<'EOF'
+[Unit]
+Description=PapaFrame Wi-Fi watchdog (one check)
+After=NetworkManager.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/frame-wifi-watchdog.sh
+EOF
+cat > /etc/systemd/system/frame-wifi-watchdog.timer <<'EOF'
+[Unit]
+Description=Run the PapaFrame Wi-Fi watchdog every 5 minutes
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now frame-wifi-watchdog.timer
+echo "  Wi-Fi watchdog armed — actions logged to /var/log/frame-wifi-watchdog.log"
+
 echo
 echo "=== DONE ==="
-echo "Watchdog + persistent logging are active now."
+echo "Watchdogs (hardware + Wi-Fi) and persistent logging are active now."
 echo "The new mount option applies on next access after an unmount:"
 echo "    sudo umount /mnt/plex 2>/dev/null; ls /mnt/plex >/dev/null"
 echo "(or it simply takes effect after the next reboot)."

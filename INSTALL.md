@@ -231,6 +231,7 @@ from the browser, rebuild the photo list, and tweak the on/off schedule.
 cd ~/papaframe
 git pull
 ~/papaframe/.venv/bin/pip install -r requirements.txt   # if requirements changed
+sudo bash scripts/harden_pi.sh                           # idempotent; picks up new hardening (v2.3.0: Wi-Fi watchdog)
 sudo systemctl restart papaframe-server
 # slideshow restarts itself when /api/restart is hit, or:
 killall start_frame.sh   # autologin loop on tty1 will respawn it

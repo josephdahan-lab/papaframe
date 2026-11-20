@@ -423,7 +423,9 @@ papaframe/
     ├── start_frame.sh     ← slideshow launcher (sources config.sh)
     ├── photo_sync.py      ← NAS-to-USB photo sync (resize, EXIF, trash)
     ├── papaframe-screen   ← root helper for HDMI on/off (installed to /usr/local/bin)
-    └── install.sh         ← Pi installer (apt deps, venv, autologin, systemd unit)
+    ├── install.sh         ← Pi installer (apt deps, venv, autologin, systemd unit)
+    ├── harden_pi.sh       ← one-time root hardening: watchdogs, persistent logs, Wi-Fi
+    └── frame-wifi-watchdog.sh ← 5-min Wi-Fi check: reconnect → cycle radio → reboot
 ```
 
 State files written at runtime live under `/tmp/` (slideshow flags, the
@@ -434,6 +436,28 @@ and the `cache/` folder holding cached photos + `manifest.tsv`).
 ---
 
 ## Changelog
+
+### v2.3.0
+
+- **Frames stay online**: frames were dropping off Wi-Fi and staying off
+  for weeks while the slideshow kept running from local photos.
+  NetworkManager gave up after 4 failed reconnects (a long router outage or
+  an overnight mesh update was enough), and Wi-Fi power saving made the
+  Pi's brcmfmac chip drop off. `scripts/harden_pi.sh` now has a 4th step
+  that sets unlimited reconnect retries, turns power saving off, and
+  installs `frame-wifi-watchdog`: every 5 minutes it pings the router, and
+  on failure reconnects, then cycles the Wi-Fi radio, then reboots after
+  about an hour offline. Actions are logged to
+  `/var/log/frame-wifi-watchdog.log`. Re-run `sudo bash scripts/harden_pi.sh`
+  on existing frames to pick it up.
+
+### v2.2.2
+
+- **No more all-night restart loop on Pi OS trixie lite frames**: the DPMS
+  helper in `server_lite.py` hard-coded HDMI connector 33, but on Raspbian 13
+  the connected port is 35, so screen-off failed every 30 s and the slideshow
+  restarted over and over through the night. The connector is now read from
+  sysfs, and `start_frame.sh` waits while the screen is scheduled off.
 
 ### v2.2.1
 
@@ -517,6 +541,12 @@ and the `cache/` folder holding cached photos + `manifest.tsv`).
   accessible and that the user running the cron job has write permissions
   to the destination directories. Verify mount ownership in `/etc/fstab`
   matches the user's UID/GID.
+- **Frame shows photos but is unreachable** — it lost Wi-Fi; the slideshow
+  keeps going from local photos. On v2.3.0+ with `harden_pi.sh` applied it
+  recovers by itself within about an hour (see
+  `/var/log/frame-wifi-watchdog.log`). Otherwise power-cycle it, or plug in
+  Ethernet and re-run `sudo bash scripts/harden_pi.sh`. If it still can't
+  join, the saved Wi-Fi password is probably out of date: `sudo nmtui`.
 - **Year filter stuck on one year** — this was a bug fixed in v2.0.0. If
   the master photo list (`photo_list.txt`) looks truncated, delete it and
   click **Rebuild photo list** on the admin page.
